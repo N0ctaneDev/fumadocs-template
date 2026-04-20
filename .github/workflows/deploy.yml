@@ -3,10 +3,15 @@ name: Build and Push
 on:
   push:
     branches:
-      - master # 你想触发这个工作流的分支，可以根据需要修改
+      - main # 你想触发这个工作流的分支，可以根据需要修改
 
   workflow_dispatch:
-
+  
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+  
 jobs:
   build:
     concurrency: ci-${{ github.ref }}
