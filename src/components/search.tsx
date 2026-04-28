@@ -19,7 +19,7 @@ import { ChevronDown } from 'lucide-react'
 import { create } from '@orama/orama'
 import { createTokenizer } from '@orama/tokenizers/mandarin'
 import { useI18n } from 'fumadocs-ui/contexts/i18n'
-import { withBasePath } from '@/lib/env'
+import {siteConfig} from '__CONFIG__'
 import { useState } from 'react'
 import { cn } from '@/lib/cn'
 
@@ -59,7 +59,7 @@ export default function DefaultSearchDialog(props: SharedProps) {
     type: 'static',
     initOrama,
     locale: 'cn',
-    from: withBasePath('/api/search'),
+    from: `${siteConfig.basePath}/api/search`,
     tag,
   })
 
