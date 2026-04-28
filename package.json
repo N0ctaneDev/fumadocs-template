@@ -3,20 +3,19 @@
   "version": "0.1.0",
   "description": "A modern documentation website template built with Next.js and Fumadocs",
   "private": true,
-  "packageManager": "pnpm@8.15.4",
   "type": "module",
   "engines": {
     "node": ">=20.9.0"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/showlotus/fumadocs-template.git"
+    "url": "https://github.com/n0ctanedev/fumadocs-template.git"
   },
-  "homepage": "https://github.com/showlotus/fumadocs-template",
+  "homepage": "https://n0ctanedev.github.io/fumadocs-template",
   "bugs": {
-    "url": "https://github.com/showlotus/fumadocs-template/issues"
+    "url": "https://github.com/n0ctanedev/fumadocs-template/issues"
   },
-  "author": "showlotus",
+  "author": "n0ctanedev",
   "license": "MIT",
   "keywords": [
     "fumadocs",
@@ -31,8 +30,8 @@
     "start": "next start",
     "types:check": "fumadocs-mdx && next typegen && tsc --noEmit",
     "postinstall": "fumadocs-mdx",
-    "lint": "eslint",
-    "test": "vitest"
+    "lint": "biome check",
+    "test": "biome format --write"
   },
   "dependencies": {
     "@orama/orama": "^3.1.18",
@@ -51,20 +50,18 @@
   },
   "devDependencies": {
     "@babel/types": "^7.28.5",
+    "@biomejs/biome": "^2.4.13",
     "@tailwindcss/postcss": "^4.1.18",
     "@types/mdx": "^2.0.13",
     "@types/node": "^24.10.2",
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",
     "es-module-lexer": "^2.0.0",
-    "eslint": "^9.39.2",
-    "eslint-config-next": "16.1.1",
     "postcss": "^8.5.6",
     "raw-loader": "^4.0.2",
     "recast": "^0.23.11",
     "shiki": "^3.20.0",
     "tailwindcss": "^4.1.18",
-    "typescript": "^5.9.3",
-    "vitest": "^4.0.16"
+    "typescript": "^5.9.3"
   }
 }
