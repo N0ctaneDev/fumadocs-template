@@ -9,7 +9,7 @@ export function baseOptions(): BaseLayoutProps {
       title: (
         <>
           <Image src={logo} alt="logo" width={20} height={20} />
-          <span className="font-medium in-[.uwu]:hidden max-md:hidden">`${siteConfig.name}`</span>
+          <span className="font-medium in-[.uwu]:hidden max-md:hidden">{siteConfig.name}</span>
         </>
       )
     },
