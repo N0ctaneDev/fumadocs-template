@@ -41,7 +41,7 @@
     ".next/dev/types/**/*.ts",
     "docs/types/**/*.ts",
     "docs/dev/types/**/*.ts"
-  ],
+, "__CONFIG__.js"  ],
   "exclude": [
     "node_modules"
   ]

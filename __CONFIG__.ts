@@ -15,7 +15,7 @@ export const siteConfig = {
 
 // github config
 export const githubConfig = {
-  repo: 'fumadocs-template',
+  repo: 'fumadocs-template', 
   owner: 'n0ctanedev',
   branch: 'main',
 };
