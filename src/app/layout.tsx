@@ -8,6 +8,7 @@ import { cn } from '@/lib/cn'
 import type { ReactNode } from 'react'
 import { getSection } from '@/lib/source'
 
+import { siteMetadata } from '__CONFIG__'
 import './global.css'
 
 const inter = Inter({
@@ -28,7 +29,11 @@ export function useMode(): string | undefined {
 export default function Layout({ children }: LayoutProps<'/'>) {
   return (
     <html lang="en" className={inter.className} suppressHydrationWarning>
-      <title>Fumadocs Template</title>
+      <title>{siteMetadata.title}</title>
+      <meta name="description" content={siteMetadata.description} />
+      <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <meta name="keywords" content={siteMetadata.keywords} />
+      <meta name="author" content={siteMetadata.author} />
       <Body>
         <RootProvider
           search={{

@@ -11,15 +11,6 @@ export default function Layout({ children }: LayoutProps<'/docs'>) {
     <DocsLayout
       tree={source.getPageTree()}
       {...base}
-      nav={{
-        ...base.nav,
-        title: (
-          <>
-            <Image src={logo} alt="logo" width={20} height={20} />
-            <span className="font-medium in-[.uwu]:hidden max-md:hidden">Fumadocs Template</span>
-          </>
-        ),
-      }}
       links={[
         {
           type: 'icon',

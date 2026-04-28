@@ -45,7 +45,7 @@ function initOrama(locale?: string) {
     schema: { _: 'string' },
     // https://docs.orama.com/docs/orama-js/supported-languages
     components: {
-      tokenizer: locale === 'cn' ? createTokenizer() : undefined,
+      tokenizer: locale === 'en' ? createTokenizer() : undefined,
     },
   })
   return res
@@ -58,7 +58,7 @@ export default function DefaultSearchDialog(props: SharedProps) {
   const { search, setSearch, query } = useDocsSearch({
     type: 'static',
     initOrama,
-    locale: 'cn',
+    locale: 'en',
     from: `${siteConfig.basePath}/api/search`,
     tag,
   })
