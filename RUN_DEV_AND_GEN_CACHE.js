@@ -1,4 +1,5 @@
 import { spawn } from "child_process";
+import kill from "tree-kill";
 
 const dev = spawn("npm", ["run", "dev"], {
   stdio: "inherit",
@@ -6,6 +7,6 @@ const dev = spawn("npm", ["run", "dev"], {
 });
 
 setTimeout(() => {
-  console.log("🛑 Stopping dev server...");
-  dev.kill("SIGINT");
-}, 8000); // run for 8 seconds
+  console.log("🛑 Killing dev server (entire tree)...");
+  kill(dev.pid, "SIGINT");
+}, 8000);
