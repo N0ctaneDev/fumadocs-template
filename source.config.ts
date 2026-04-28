@@ -1,37 +1,17 @@
-import { defineConfig, defineDocs, frontmatterSchema, metaSchema } from 'fumadocs-mdx/config'
-import lastModified from 'fumadocs-mdx/plugins/last-modified'
-import { remarkViewCode } from '@/plugins/remark-view-code'
-import { remarkThemeImage } from '@/plugins/remark-theme-image'
+// source.config.ts
+// AUTO-GENERATED — DO NOT EDIT MANUALLY
+// Edit __CONFIG__.ts then run: npm run gen:sources
 
-// You can customise Zod schemas for frontmatter and `meta.json` here
-// see https://fumadocs.dev/docs/mdx/collections
-export const docs = defineDocs({
-  dir: 'content/docs',
-  docs: {
-    schema: frontmatterSchema,
-    postprocess: {
-      includeProcessedMarkdown: true,
-    },
-  },
-  meta: {
-    schema: metaSchema,
-  },
-})
+import { defineDocs, defineConfig } from "fumadocs-mdx/config";
 
-export default defineConfig({
-  mdxOptions: {
-    // MDX options
-    remarkCodeTabOptions: {
-      parseMdx: true,
-    },
-    rehypeCodeOptions: {
-      inline: 'tailing-curly-colon',
-      themes: {
-        light: 'github-light',
-        dark: 'github-dark',
-      },
-    },
-    remarkPlugins: [remarkViewCode, remarkThemeImage],
-  },
-  plugins: [lastModified()],
-})
+// Docs → content/docs
+export const docsDocs = defineDocs({
+  dir: "content/docs",
+});
+
+// N0shop → content/n0shop
+export const n0shopDocs = defineDocs({
+  dir: "content/n0shop",
+});
+
+export default defineConfig();

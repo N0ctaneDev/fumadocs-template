@@ -1,0 +1,41 @@
+import { docs } from 'fumadocs-mdx:collections/server'
+import { type InferPageType, loader } from 'fumadocs-core/source'
+import { lucideIconsPlugin } from 'fumadocs-core/source/lucide-icons'
+import { i18n } from './i18n'
+
+// See https://fumadocs.dev/docs/headless/source-api for more info
+export const source = loader({
+  i18n,
+  baseUrl: '/docs',
+  source: docs.toFumadocsSource(),
+  plugins: ({ typedPlugin }) => [lucideIconsPlugin()],
+})
+
+export function getSection(path: string | undefined) {
+  if (!path) return 'en'
+  const [dir] = path.split('/', 1)
+  if (!dir) return 'en'
+  return (
+    {
+      cn: 'cn',
+      en: 'en',
+    }[dir] ?? 'en'
+  )
+}
+
+export function getPageImage(page: InferPageType<typeof source>) {
+  const segments = [...page.slugs, 'image.png']
+
+  return {
+    segments,
+    url: `/og/docs/${segments.join('/')}`,
+  }
+}
+
+export async function getLLMText(page: InferPageType<typeof source>) {
+  const processed = await page.data.getText('processed')
+
+  return `# ${page.data.title}
+
+${processed}`
+}
