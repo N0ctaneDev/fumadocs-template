@@ -48,10 +48,7 @@ export async function generateStaticParams() {
   const params: { project: string; slug: string[] }[] = [];
 
   for (const [projectSlug, source] of Object.entries(SOURCE_REGISTRY)) {
-    const projectParams = source.generateParams().map((p: { slug?: string[] }) => ({
-      project: projectSlug,
-      slug: p.slug ?? [],
-    }));
+    const projectParams = source.generateParams()
     params.push(...projectParams);
   }
 
