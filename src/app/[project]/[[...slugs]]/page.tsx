@@ -6,6 +6,7 @@ import {
   DocsBody,
   DocsTitle,
   DocsDescription,
+  PageLastUpdate
 } from "fumadocs-ui/page";
 import defaultMdxComponents from "fumadocs-ui/mdx";
 import { SOURCE_REGISTRY } from "@/lib/sources";
