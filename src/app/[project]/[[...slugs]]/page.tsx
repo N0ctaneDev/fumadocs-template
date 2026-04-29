@@ -28,6 +28,7 @@ export default async function DocPage({ params }: Props) {
   if (!page) notFound();
 
   const MDX = page.data.body;
+  const lastModifiedTime = page.data.lastModified;
 
   return (
     <DocsPage toc={page.data.toc}>
@@ -36,6 +37,7 @@ export default async function DocPage({ params }: Props) {
       <DocsBody>
         <MDX components={{ ...defaultMdxComponents }} />
       </DocsBody>
+      {lastModifiedTime && <PageLastUpdate date={lastModifiedTime} />}
     </DocsPage>
   );
 }
