@@ -1,17 +1,17 @@
-'use client'
+"use client";
 
-import { Tab, Tabs } from 'fumadocs-ui/components/tabs'
-import { CodeBlock } from './code-block'
+import { Tab, Tabs } from "fumadocs-ui/components/tabs";
+import { CodeBlock } from "./code-block";
 
 export function ViewCode(props: {
-  src?: string
-  code: string
-  component?: React.FunctionComponent<void>
+  src?: string;
+  code: string;
+  component?: React.FunctionComponent<void>;
 }) {
-  const { code, component } = props
+  const { code, component } = props;
   return (
     <div className="view-code-container">
-      <Tabs items={['View', 'Code']} defaultIndex={0}>
+      <Tabs items={["View", "Code"]} defaultIndex={0}>
         <Tab value="View">
           <>{component}</>
         </Tab>
@@ -20,7 +20,7 @@ export function ViewCode(props: {
         </Tab>
       </Tabs>
     </div>
-  )
+  );
 }
 
-export const displayName = (ViewCode.dispalyName = 'ViewCode')
+export const displayName = (ViewCode.dispalyName = "ViewCode");

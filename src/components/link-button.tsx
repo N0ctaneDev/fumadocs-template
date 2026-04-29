@@ -1,15 +1,15 @@
-'use client'
+"use client";
 
-import { Link, ExternalLink } from 'lucide-react'
-import { Button } from './button'
+import { Link, ExternalLink } from "lucide-react";
+import { Button } from "./button";
 
 export function LinkButton(props: {
-  url?: string
-  icon?: React.ReactNode
-  text?: string
-  children?: React.ReactNode
+  url?: string;
+  icon?: React.ReactNode;
+  text?: string;
+  children?: React.ReactNode;
 }) {
-  const { url, icon = <Link />, text, children } = props
+  const { url, icon = <Link />, text, children } = props;
   return (
     <Button>
       <a
@@ -21,5 +21,5 @@ export function LinkButton(props: {
         {children ? children : text}
       </a>
     </Button>
-  )
+  );
 }

@@ -1,14 +1,14 @@
-import { source } from '@/lib/source'
-import { createFromSource } from 'fumadocs-core/search/server'
-import { createTokenizer } from '@orama/tokenizers/mandarin'
+import { source } from "@/lib/source";
+import { createFromSource } from "fumadocs-core/search/server";
+import { createTokenizer } from "@orama/tokenizers/mandarin";
 
 // statically cached
-export const revalidate = false
+export const revalidate = false;
 export const { staticGET: GET } = createFromSource(source, {
   // https://docs.orama.com/docs/orama-js/supported-languages
   // 不同语言的搜索配置
   localeMap: {
-    en: { language: 'english' },
+    en: { language: "english" },
   },
   buildIndex(page) {
     return {
@@ -18,6 +18,6 @@ export const { staticGET: GET } = createFromSource(source, {
       id: page.url,
       structuredData: page.data.structuredData,
       tag: page.slugs[0],
-    }
+    };
   },
-})
+});

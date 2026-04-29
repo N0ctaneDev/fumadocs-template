@@ -1,7 +1,7 @@
-import Link from 'next/link'
-import { cn } from '@/lib/cn'
-import { buttonVariants } from 'fumadocs-ui/components/ui/button'
-import { Button } from '@/components/button'
+import Link from "next/link";
+import { cn } from "@/lib/cn";
+import { buttonVariants } from "fumadocs-ui/components/ui/button";
+import { Button } from "@/components/button";
 
 export default function HomePage() {
   return (
@@ -13,12 +13,15 @@ export default function HomePage() {
             A fumadocs template
           </h1>
           <div className="flex flex-row items-center justify-center gap-4 flex-wrap w-full">
-            <Link href="/docs/en/components" className={cn(buttonVariants(), 'max-sm:text-sm')}>
+            <Link
+              href="/docs/en/components"
+              className={cn(buttonVariants(), "max-sm:text-sm")}
+            >
               <Button>Getting Started</Button>
             </Link>
           </div>
         </div>
       </div>
     </div>
-  )
+  );
 }

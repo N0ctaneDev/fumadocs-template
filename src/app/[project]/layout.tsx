@@ -21,10 +21,7 @@ export default async function ProjectLayout({ params, children }: Props) {
   const config = PROJECT_MAP[project];
 
   return (
-    <DocsLayout
-      tree={source.pageTree}
-      nav={{ title: config.label }}
-    >
+    <DocsLayout tree={source.pageTree} nav={{ title: config.label }}>
       {children}
     </DocsLayout>
   );

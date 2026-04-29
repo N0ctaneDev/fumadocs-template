@@ -1,6 +1,6 @@
-'use client'
+"use client";
 
-import ThemeToggle from './toggle-theme'
+import ThemeToggle from "./toggle-theme";
 
 export default function Demo() {
   return (
@@ -10,5 +10,5 @@ export default function Demo() {
         click <ThemeToggle /> to toggle theme and the icon will change.
       </div>
     </div>
-  )
+  );
 }

@@ -27,7 +27,7 @@
   "scripts": {
     "gen:sources": "npx tsx scripts/gen-sources.mts",
     "predev": "npm run gen:sources",
-    "prebuild": "node RUN_DEV_AND_GEN_CACHE.js",
+    "prebuild": "node scripts/RUN_DEV_AND_GEN_CACHE.js",
     "build": "next build",
     "dev": "next dev",
     "start": "next start",

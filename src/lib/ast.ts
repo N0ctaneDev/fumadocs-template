@@ -1,25 +1,25 @@
-import * as t from '@babel/types'
+import * as t from "@babel/types";
 
 function programWithExpression(expr: t.Expression) {
-  return t.program([t.expressionStatement(expr)], [], 'module')
+  return t.program([t.expressionStatement(expr)], [], "module");
 }
 
 function mdxExpressionAttribute(
   name: string,
   value: string,
-  expression: t.Expression
+  expression: t.Expression,
 ) {
   return {
-    type: 'mdxJsxAttribute',
+    type: "mdxJsxAttribute",
     name,
     value: {
-      type: 'mdxJsxAttributeValueExpression',
+      type: "mdxJsxAttributeValueExpression",
       value,
       data: {
         estree: programWithExpression(expression),
       },
     },
-  }
+  };
 }
 
 /**
@@ -28,20 +28,20 @@ function mdxExpressionAttribute(
  */
 export function generateImport(name: string, value: string) {
   return {
-    type: 'mdxjsEsm',
+    type: "mdxjsEsm",
     data: {
       estree: t.program(
         [
           t.importDeclaration(
             [t.importDefaultSpecifier(t.identifier(name))],
-            t.stringLiteral(value)
+            t.stringLiteral(value),
           ),
         ],
         [],
-        'module'
+        "module",
       ),
     },
-  }
+  };
 }
 
 /**
@@ -49,7 +49,7 @@ export function generateImport(name: string, value: string) {
  * foo={bar}
  */
 export function generateStringAttribute(name: string, value: string) {
-  return mdxExpressionAttribute(name, value, t.identifier(value))
+  return mdxExpressionAttribute(name, value, t.identifier(value));
 }
 
 /**
@@ -57,7 +57,7 @@ export function generateStringAttribute(name: string, value: string) {
  * foo={expr}
  */
 export function generateExpressionAttribute(name: string, value: string) {
-  return mdxExpressionAttribute(name, value, t.identifier(value))
+  return mdxExpressionAttribute(name, value, t.identifier(value));
 }
 
 /**
@@ -69,10 +69,10 @@ export function generateJsxAttribute(name: string, componentName: string) {
     t.jsxOpeningElement(t.jsxIdentifier(componentName), [], true),
     null,
     [],
-    true
-  )
+    true,
+  );
 
-  return mdxExpressionAttribute(name, `<${componentName} />`, jsxElement)
+  return mdxExpressionAttribute(name, `<${componentName} />`, jsxElement);
 }
 
 /**
@@ -83,6 +83,6 @@ export function attrMember(name: string, object: string, property: string) {
   return mdxExpressionAttribute(
     name,
     `${object}.${property}`,
-    t.memberExpression(t.identifier(object), t.identifier(property))
-  )
+    t.memberExpression(t.identifier(object), t.identifier(property)),
+  );
 }
