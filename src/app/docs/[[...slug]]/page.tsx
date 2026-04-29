@@ -17,7 +17,7 @@ export default async function Page(props: PageProps<"/docs/[[...slug]]">) {
   if (!page) notFound();
 
   const MDX = page.data.body;
-  const lastModified = page.data.lastModified;
+  // const lastModified = page.data.lastModified;
 
   return (
     <DocsPage toc={page.data.toc} full={page.data.full}>
@@ -31,7 +31,7 @@ export default async function Page(props: PageProps<"/docs/[[...slug]]">) {
           })}
         />
       </DocsBody>
-      {lastModified && <PageLastUpdate date={lastModified} />}
+      {/* {lastModified && <PageLastUpdate date={lastModified} />} */}
     </DocsPage>
   );
 }
