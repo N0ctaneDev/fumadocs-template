@@ -7,5 +7,8 @@
     "mdxjs",
     "Orama",
     "shiki"
+  ],
+  "github-actions.workflows.pinned.workflows": [
+    ".github/workflows/deploy.yml"
   ]
 }
