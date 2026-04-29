@@ -3,7 +3,7 @@
 // Auto-runs via predev / prebuild hooks — you never call this manually.
 
 import { writeFileSync, mkdirSync } from "fs";
-import { PROJECTS } from "../__CONFIG__";
+import { PROJECTS } from "__CONFIG__";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -46,8 +46,6 @@ console.log("✅  source.config.ts written");
 
 // ─── Generate src/lib/sources.ts ─────────────────────────────────────────────
 
-mkdirSync("src/lib", { recursive: true }); // ← changed from "lib"
-
 const sourcesLines: string[] = [
   `// src/lib/sources.ts`,
   `// AUTO-GENERATED — DO NOT EDIT MANUALLY`,
@@ -55,8 +53,8 @@ const sourcesLines: string[] = [
   ``,
   `import { loader, type InferPageType } from "fumadocs-core/source";`,
   `import { lucideIconsPlugin } from "fumadocs-core/source/lucide-icons";`,
-  `import { PROJECTS } from "@/__CONFIG__";`,
-  `import { i18n } from "@/src/lib/i18n";`, // ← @/ = root, file is at src/lib/
+  `import { PROJECTS } from "__CONFIG__";`,
+  `import { i18n } from "@/lib/i18n";`, // ← @/ = .src, file is at src/lib/
   ``,
   `// v14: collections live in fumadocs-mdx:collections/server`,
   `// tsconfig alias: "collections/*" → ".source/*"`,
@@ -94,7 +92,7 @@ for (const project of PROJECTS) {
 
     // getSection re-export namespaced per project
     `/** Returns the language section of a ${Pascal} page path. */`,
-    `export { getSection as get${Pascal}Section } from "@/src/lib/i18n";`, // ← updated
+    `export { getSection as get${Pascal}Section } from "@/lib/i18n";`, // ← updated
     ``,
 
     // getPageImage

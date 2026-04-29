@@ -1,8 +1,8 @@
 // app/[project]/layout.tsx
 
 import { notFound } from "next/navigation";
-import { DocsLayout } from "fumadocs-ui/layout";
-import { PROJECT_MAP } from "@/__CONFIG__";
+import { DocsLayout } from "fumadocs-ui/layout/docs";
+import { PROJECT_MAP } from "__CONFIG__";
 import { SOURCE_REGISTRY } from "@/lib/sources";
 import type { ReactNode } from "react";
 
