@@ -121,14 +121,15 @@ for (const project of PROJECTS) {
 sourcesLines.push(
   `// ─── Registry ────────────────────────────────────────────────────────────────`,
   `// Consumed by app/[project]/layout.tsx and page.tsx for dynamic dispatch.`,
+  `// Individual sources above are fully typed — registry uses any for dispatch only.`,
   `// eslint-disable-next-line @typescript-eslint/no-explicit-any`,
-  `export const SOURCE_REGISTRY: Record<string, ReturnType<typeof loader<any>>> = {`,
+  `export const SOURCE_REGISTRY: Record<string, any> = {`,
 );
 
 for (const project of PROJECTS) {
-  sourcesLines.push(`  "${project.slug}": ${toCamel(project.slug)}Source,`);
+  sourcesLines.push(`  // eslint-disable-next-line @typescript-eslint/no-explicit-any`);
+  sourcesLines.push(`  "${project.slug}": ${toCamel(project.slug)}Source as any,`);
 }
-
 sourcesLines.push(
   `};`,
   ``,
