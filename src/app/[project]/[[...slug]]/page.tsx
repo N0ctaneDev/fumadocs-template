@@ -8,10 +8,12 @@ import {
   DocsDescription,
   PageLastUpdate
 } from "fumadocs-ui/page";
-import defaultMdxComponents from "fumadocs-ui/mdx";
+import { getMDXComponents } from "@/mdx-components";
 import { SOURCE_REGISTRY } from "@/lib/sources";
 import { PROJECT_MAP } from "__CONFIG__";
 import type { Metadata } from "next";
+import { createRelativeLink } from "fumadocs-ui/mdx";
+
 
 type Props = {
   params: Promise<{ project: string; slug?: string[] }>;
@@ -36,7 +38,12 @@ export default async function DocPage({ params }: Props) {
       <DocsTitle>{page.data.title}</DocsTitle>
       <DocsDescription>{page.data.description}</DocsDescription>
       <DocsBody>
-        <MDX components={{ ...defaultMdxComponents }} />
+        <MDX
+          components={getMDXComponents({
+            // this allows you to link to other pages with relative file paths
+            a: createRelativeLink(source, page),
+          })}
+        />
       </DocsBody>
       {lastModifiedTime && <PageLastUpdate date={lastModifiedTime} />}
     </DocsPage>
