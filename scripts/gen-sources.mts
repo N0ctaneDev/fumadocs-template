@@ -35,16 +35,16 @@ for (const project of PROJECTS) {
     `// ${toPascal(project.slug)} → ${project.contentDir}`,
     `export const ${name}Docs = defineDocs({`,
     `  dir: "${project.contentDir}",`,
-    
-    `  docs: {`
-    `    schema: pageSchema,`
-    `    postprocess: {`
-    `      includeProcessedMarkdown: true,`
-    `    },`
-    `  },`
-    `  meta: {`
-    `    schema: metaSchema,`
-    `  },`
+    ``,
+    `  docs: {`,
+    `    schema: pageSchema,`,
+    `    postprocess: {`,
+    `      includeProcessedMarkdown: true,`,
+    `    },`,
+    `  },`,
+    `  meta: {`,
+    `    schema: metaSchema,`,
+    `  },`,
     `});`,
     ``,
   );
