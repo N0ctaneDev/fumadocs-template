@@ -67,14 +67,46 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
   const { project, slug } = await params;
 
   if (!(project in SOURCE_REGISTRY)) return {};
-  const source = SOURCE_REGISTRY[project as keyof typeof SOURCE_REGISTRY];
+  const source = SOURCE_REGISTRY[project];
   const config = PROJECT_MAP[project];
 
   const page = source.getPage(slug);
   if (!page) return {};
 
+  const pageTitle = `${page.data.title} — ${config.label}`;
+  const ogImageUrl = `/og/${project}/${[...page.slugs, "image.png"].join("/")}`;
+
+  // OG route exists only if defaultOgImage is set OR you want per-page generated images
+  // Here we tie it to the same flag — if blank, no OG image on any page
+  const hasOgImage = socialConfig.defaultOgImage !== "";
+
   return {
-    title: `${page.data.title} — ${config.label}`,
+    title: page.data.title,
     description: page.data.description,
+
+    openGraph: {
+      title: pageTitle,
+      description: page.data.description,
+      type: "article",
+      ...(hasOgImage && {
+        images: [
+          {
+            url: ogImageUrl,
+            width: 1200,
+            height: 630,
+            alt: pageTitle,
+          },
+        ],
+      }),
+    },
+
+    twitter: {
+      title: pageTitle,
+      description: page.data.description,
+      ...(hasOgImage && {
+        images: [ogImageUrl],
+      }),
+    },
   };
+}
 }

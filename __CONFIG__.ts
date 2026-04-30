@@ -34,6 +34,28 @@ export const PROJECTS: ProjectConfig[] = [
   },
 ];
 
+// social + SEO config
+export const socialConfig = {
+  /** Your deployed URL — no trailing slash */
+  siteUrl: "https://n0ctanedev.github.io/fumadocs-template",
+
+  /** Twitter/X handle — include the @ */
+  twitterHandle: "@n0ctanedev",
+
+  /** OG image shown when sharing the homepage/non-doc pages */
+  defaultOgImage: "/og-default.png", // put this in /public
+
+  /** locale for OG — always en_US for English */
+  locale: "en_US",
+};
+
+
+
+
+
+
+
+
 // some backend stuff going on...
 // dont touch unless you know what you're doing, but feel free to peek if you're curious how the sausage is made
 
