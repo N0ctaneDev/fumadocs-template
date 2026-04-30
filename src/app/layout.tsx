@@ -7,6 +7,8 @@ import { siteMetadata, siteConfig, socialConfig } from "__CONFIG__";
 import { Body } from "./body";
 import "./global.css";
 
+import { siteConfig } from "__CONFIG__";
+
 const inter = Inter({
   subsets: ["latin"],
 });
@@ -53,11 +55,20 @@ export const metadata: Metadata = {
   },
 };
 
+
 export default function Layout({ children }: { children: ReactNode }) {
   return (
     <html lang="en" className={inter.className} suppressHydrationWarning>
       <Body>
-        <RootProvider search={{ SearchDialog }}>
+        <RootProvider
+          search={{
+            SearchDialog,
+            options: {
+              type: "static",
+              from: `${siteConfig.basePath}/api/search/`,
+            },
+          }}
+        >
           {children}
         </RootProvider>
       </Body>
