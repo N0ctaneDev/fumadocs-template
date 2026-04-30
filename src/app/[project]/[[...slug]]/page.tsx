@@ -10,7 +10,7 @@ import {
 } from "fumadocs-ui/page";
 import { getMDXComponents } from "@/mdx-components";
 import { SOURCE_REGISTRY } from "@/lib/sources";
-import { PROJECT_MAP } from "__CONFIG__";
+import { PROJECT_MAP , socialConfig} from "__CONFIG__";
 import type { Metadata } from "next";
 import { createRelativeLink } from "fumadocs-ui/mdx";
 
@@ -55,7 +55,10 @@ export async function generateStaticParams() {
   const params: { project: string; slug: string[] }[] = [];
 
   for (const [projectSlug, source] of Object.entries(SOURCE_REGISTRY)) {
-    const projectParams = source.generateParams()
+    const projectParams = source.generateParams().map((p: { slug?: string[] }) => ({
+      project: projectSlug,
+      slug: p.slug ?? [],
+    }));
     params.push(...projectParams);
   }
 
