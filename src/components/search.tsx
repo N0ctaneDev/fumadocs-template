@@ -20,51 +20,79 @@ import {
 } from "fumadocs-ui/components/ui/popover";
 import { buttonVariants } from "fumadocs-ui/components/ui/button";
 import { ChevronDown } from "lucide-react";
-import { create } from "@orama/orama";
-import { createTokenizer } from "@orama/tokenizers/mandarin";
-import { useI18n } from "fumadocs-ui/contexts/i18n";
-import { siteConfig } from "__CONFIG__";
-import { useState } from "react";
+import { PROJECTS, siteConfig } from "__CONFIG__";
+import { SOURCE_REGISTRY } from "@/lib/sources";
+import { useState, useMemo } from "react";
+import { useParams } from "next/navigation";
 import { cn } from "@/lib/cn";
 
-const items = [
-  {
-    name: "All",
-    value: undefined,
-  },
-  {
-    name: "English",
-    value: "en",
-    description: "The English docs",
-  },
-  {
-    name: "Chinese",
-    value: "cn",
-    description: "The Chinese docs",
-  },
-];
-
-function initOrama(locale?: string) {
-  const res = create({
-    schema: { _: "string" },
-    // https://docs.orama.com/docs/orama-js/supported-languages
-    components: {
-      tokenizer: locale === "en" ? createTokenizer() : undefined,
-    },
-  });
-  return res;
-}
+type FilterItem = {
+  name: string;
+  value: string | undefined;
+  description?: string;
+  isGroup?: boolean;
+};
 
 export default function DefaultSearchDialog(props: SharedProps) {
-  const { locale } = useI18n(); // (optional) for i18n
   const [open, setOpen] = useState(false);
   const [tag, setTag] = useState<string | undefined>();
+  const params = useParams();
+
+  // Detect current project from URL params
+  const currentProject = typeof params.project === "string"
+    ? params.project
+    : undefined;
+
+  // Build contextual filter items based on current project
+  const items = useMemo<FilterItem[]>(() => {
+    const list: FilterItem[] = [
+      { name: "All Projects", value: undefined },
+    ];
+
+    if (currentProject && currentProject in SOURCE_REGISTRY) {
+      const source = SOURCE_REGISTRY[currentProject];
+      const projectConfig = PROJECTS.find((p) => p.slug === currentProject);
+
+      // Project-level filter (all pages in this project)
+      list.push({
+        name: projectConfig?.label ?? currentProject,
+        value: currentProject,
+        description: `All ${projectConfig?.label ?? currentProject} pages`,
+        isGroup: true,
+      });
+
+      // Page-level filters (individual pages in this project)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      source.getPages().forEach((page: any) => {
+        list.push({
+          name: page.data.title,
+          value: `${currentProject}/${page.slugs.join("/")}`,
+          description: page.url,
+        });
+      });
+    } else {
+      // Not on a project route — show all projects as group filters
+      PROJECTS.forEach((p) => {
+        list.push({
+          name: p.label,
+          value: p.slug,
+          description: `/${p.slug} docs`,
+          isGroup: true,
+        });
+      });
+    }
+
+    return list;
+  }, [currentProject]);
+
+  // Default tag to current project when dialog opens on a project route
+  const effectiveTag = tag ?? (currentProject ? currentProject : undefined);
+
   const { search, setSearch, query } = useDocsSearch({
     type: "static",
-    initOrama,
     locale: "en",
     from: `${siteConfig.basePath}/api/search`,
-    tag,
+    tag: effectiveTag,
   });
 
   return (
@@ -92,29 +120,46 @@ export default function DefaultSearchDialog(props: SharedProps) {
               })}
             >
               <span className="text-fd-muted-foreground/80 me-2">Filter</span>
-              {items.find((item) => item.value === tag)?.name}
+              {items.find((item) => item.value === effectiveTag)?.name ?? "All Projects"}
               <ChevronDown className="size-3.5 text-fd-muted-foreground" />
             </PopoverTrigger>
-            <PopoverContent className="flex flex-col p-1 gap-1" align="start">
+            <PopoverContent
+              className="flex flex-col p-1 gap-1 max-h-64 overflow-y-auto"
+              align="start"
+            >
               {items.map((item, i) => {
-                const isSelected = item.value === tag;
-
+                const isSelected = item.value === effectiveTag;
                 return (
                   <button
                     key={i}
                     onClick={() => {
+                      // clicking current project group → set to project tag
+                      // clicking "All Projects" → clear tag
                       setTag(item.value);
                       setOpen(false);
                     }}
                     className={cn(
                       "rounded-lg text-start px-2 py-1.5",
+                      item.isGroup && "mt-1 border-t border-fd-border pt-2 first:border-0 first:mt-0",
                       isSelected
                         ? "text-fd-primary bg-fd-primary/10"
                         : "hover:text-fd-accent-foreground hover:bg-fd-accent",
                     )}
                   >
-                    <p className="font-medium mb-0.5">{item.name}</p>
-                    <p className="text-xs opacity-70">{item.description}</p>
+                    <p className={cn(
+                      "mb-0.5",
+                      item.isGroup ? "font-semibold text-sm" : "font-medium text-sm pl-2"
+                    )}>
+                      {item.isGroup ? "▸ " : ""}{item.name}
+                    </p>
+                    {item.description && (
+                      <p className={cn(
+                        "text-xs opacity-70",
+                        !item.isGroup && "pl-2"
+                      )}>
+                        {item.description}
+                      </p>
+                    )}
                   </button>
                 );
               })}
