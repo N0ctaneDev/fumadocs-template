@@ -1,7 +1,0 @@
-{
-  "title": "Chinese",
-  "description": "The Chinese docs",
-  "icon": "Languages",
-  "root": true,
-  "pages": ["..."]
-}
