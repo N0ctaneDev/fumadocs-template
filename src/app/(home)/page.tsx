@@ -14,7 +14,7 @@ export default function HomePage() {
           </h1>
           <div className="flex flex-row items-center justify-center gap-4 flex-wrap w-full">
             <Link
-              href="/docs/en/components"
+              href="/docs"
               className={cn(buttonVariants(), "max-sm:text-sm")}
             >
               <Button>Getting Started</Button>
