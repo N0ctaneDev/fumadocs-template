@@ -91,7 +91,7 @@ export default function DefaultSearchDialog(props: SharedProps) {
   const { search, setSearch, query } = useDocsSearch({
     type: "static",
     locale: "en",
-    from: `${siteConfig.basePath}/api/search`,
+    from: `${siteConfig.basePath}/api/search/`,
     tag: effectiveTag,
   });
 
