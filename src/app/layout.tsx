@@ -1,15 +1,10 @@
-import { RootProvider } from "fumadocs-ui/provider/next";
-import { Inter } from "next/font/google";
 import type { Metadata } from "next";
 import type { ReactNode } from "react";
+import { Inter } from "next/font/google";
 import { siteMetadata, siteConfig, socialConfig } from "__CONFIG__";
 import { Body } from "./body";
+import { Provider } from "./provider";
 import "./global.css";
-
-import dynamic from "next/dynamic";
-// Must be lazy loaded — static import breaks static search client hydration
-const SearchDialog = dynamic(() => import("@/components/search"));
-
 
 const inter = Inter({
   subsets: ["latin"],
@@ -57,18 +52,11 @@ export const metadata: Metadata = {
   },
 };
 
-
 export default function Layout({ children }: { children: ReactNode }) {
   return (
     <html lang="en" className={inter.className} suppressHydrationWarning>
       <Body>
-        <RootProvider
-          search={{
-            SearchDialog,
-          }}
-        >
-          {children}
-        </RootProvider>
+        <Provider>{children}</Provider>
       </Body>
     </html>
   );

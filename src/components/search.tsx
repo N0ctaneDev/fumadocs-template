@@ -25,7 +25,7 @@ import { SOURCE_REGISTRY } from "@/lib/sources";
 import { useState, useMemo } from "react";
 import { useParams } from "next/navigation";
 import { cn } from "@/lib/cn";
-
+import { create } from "@orama/orama";
 type FilterItem = {
   name: string;
   value: string | undefined;
@@ -88,9 +88,17 @@ export default function DefaultSearchDialog(props: SharedProps) {
   // Default tag to current project when dialog opens on a project route
   const effectiveTag = tag ?? (currentProject ? currentProject : undefined);
 
+  function initOrama() {
+    return create({
+      schema: { _: "string" },
+      language: "english",
+    });
+  }
+
   const { search, setSearch, query } = useDocsSearch({
     type: "static",
     locale: "en",
+    initOrama,
     from: `${siteConfig.basePath}/api/search/`,
     tag: effectiveTag,
   });
