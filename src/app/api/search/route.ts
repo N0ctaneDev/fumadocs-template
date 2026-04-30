@@ -12,33 +12,34 @@ export const revalidate = false;
 const indexes = Object.entries(SOURCE_REGISTRY).flatMap(
   ([projectSlug, source]) =>
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    source.getPages().flatMap((page: any) =>
+    source.getPages().flatMap((page: any) => {
 
       // DEBUG — remove after confirming
       console.log(`[search] ${projectSlug} | ${page.url} | structuredData:`,
         page.data.structuredData ? "✅" : "❌ MISSING"
       );
 
-return [
-  // Entry 1 — project-level tag
-  {
-    title: page.data.title,
-    description: page.data.description ?? "",
-    url: page.url,
-    id: `${projectSlug}::${page.url}`,
-    structuredData: page.data.structuredData,
-    tag: projectSlug,
-  },
-  // Entry 2 — page-level tag
-  {
-    title: page.data.title,
-    description: page.data.description ?? "",
-    url: page.url,
-    id: `${projectSlug}/${page.slugs.join("/")}::${page.url}`,
-    structuredData: page.data.structuredData,
-    tag: `${projectSlug}/${page.slugs.join("/")}`,
-  },
-])
+      return [
+        // Entry 1 — project-level tag
+        {
+          title: page.data.title,
+          description: page.data.description ?? "",
+          url: page.url,
+          id: `${projectSlug}::${page.url}`,
+          structuredData: page.data.structuredData,
+          tag: projectSlug,
+        },
+        // Entry 2 — page-level tag
+        {
+          title: page.data.title,
+          description: page.data.description ?? "",
+          url: page.url,
+          id: `${projectSlug}/${page.slugs.join("/")}::${page.url}`,
+          structuredData: page.data.structuredData,
+          tag: `${projectSlug}/${page.slugs.join("/")}`,
+        },
+      ]
+    })
 );
 
 export const { staticGET: GET } = createSearchAPI("advanced", {
