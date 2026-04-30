@@ -37,4 +37,4 @@ const indexes = Object.entries(SOURCE_REGISTRY).flatMap(
 export const { staticGET: GET } = createSearchAPI("advanced", {
   language: "english",
   indexes,
-}); 1
+}); 
