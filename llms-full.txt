@@ -7,5 +7,14 @@
 [go here to test the N0shop route](https://n0ctanedev.github.io/fumadocs-template/n0shop)
 
 
+# normal hai bhai
+
+
+
+# Hellow Fellas
+
+[go here to test the docs route](https://n0ctanedev.github.io/fumadocs-template/docs)
+
+
 # Components
 
