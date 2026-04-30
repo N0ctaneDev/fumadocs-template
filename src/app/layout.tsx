@@ -7,8 +7,6 @@ import { siteMetadata, siteConfig, socialConfig } from "__CONFIG__";
 import { Body } from "./body";
 import "./global.css";
 
-import { siteConfig } from "__CONFIG__";
-
 const inter = Inter({
   subsets: ["latin"],
 });
