@@ -1,4 +1,4 @@
-// src/app/og/[project]/[[]...slug]]/route.ts
+// src/app/og/[project]/[...slug]/route.ts
 // Generates OG preview images for all projects dynamically.
 // URL pattern: /og/[project]/[...page-slugs]/image.png
 // e.g. /og/docs/getting-started/install/image.png
