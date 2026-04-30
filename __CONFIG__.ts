@@ -9,7 +9,7 @@ export const siteMetadata = {
 
 // site config
 export const siteConfig = {
-  basePath: "/fumadocs-template", // set it to '' if you want to deploy to root (https://username.github.io/)
+  basePath: `/${githubConfig.repo}`, // set it to '' if you want to deploy to root (https://username.github.io/)
   name: "Fumadocs Template", // shown on the navbar and used as default title suffix
 };
 
