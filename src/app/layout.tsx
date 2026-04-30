@@ -1,11 +1,15 @@
 import { RootProvider } from "fumadocs-ui/provider/next";
 import { Inter } from "next/font/google";
-import SearchDialog from "@/components/search";
 import type { Metadata } from "next";
 import type { ReactNode } from "react";
 import { siteMetadata, siteConfig, socialConfig } from "__CONFIG__";
 import { Body } from "./body";
 import "./global.css";
+
+import dynamic from "next/dynamic";
+// Must be lazy loaded — static import breaks static search client hydration
+const SearchDialog = dynamic(() => import("@/components/search"));
+
 
 const inter = Inter({
   subsets: ["latin"],
@@ -61,10 +65,6 @@ export default function Layout({ children }: { children: ReactNode }) {
         <RootProvider
           search={{
             SearchDialog,
-            options: {
-              type: "static",
-              from: `${siteConfig.basePath}/api/search/`,
-            },
           }}
         >
           {children}
