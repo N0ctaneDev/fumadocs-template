@@ -104,7 +104,7 @@ export default function DefaultSearchDialog(props: SharedProps) {
     initOrama,
     locale: "en",
     from: `${siteConfig.basePath}/api/search`,
-    tag: effectiveTag,
+    // tag: effectiveTag,
   });
 
   const selectedLabel =
