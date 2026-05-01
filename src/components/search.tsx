@@ -103,7 +103,7 @@ export default function DefaultSearchDialog(props: SharedProps) {
     type: "static",
     initOrama,
     locale: "en",
-    // from: `${siteConfig.basePath}/api/search`,
+    from: `${siteConfig.basePath}/api/search`,
     tag: effectiveTag,
   });
 
