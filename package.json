@@ -25,7 +25,7 @@
     "template"
   ],
   "scripts": {
-    "gen:sections": "tsx scripts/gen-sections.mts",
+    "gen:sections": "npx tsx scripts/gen-sections.mts",
     "gen:sources": "npx tsx scripts/gen-sources.mts",
     "predev": "npm run gen:sources && npm run gen:sections",
     "prebuild": "node scripts/RUN_DEV_AND_GEN_CACHE.js",
