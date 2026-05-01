@@ -34,7 +34,7 @@ type FilterItem = {
   isGroup?: boolean;
 };
 
-export default function SearchDialog(props: SharedProps) {
+export default function DefaultSearchDialog(props: SharedProps) {
   const [open, setOpen] = useState(false);
   const [tag, setTag] = useState<string | undefined>();
   const params = useParams();
