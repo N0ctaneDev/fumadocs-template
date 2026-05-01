@@ -200,4 +200,4 @@ export default function DefaultSearchDialog(props: SharedProps) {
       </SearchDialogContent>
     </SearchDialog>
   );
-} a
+}
