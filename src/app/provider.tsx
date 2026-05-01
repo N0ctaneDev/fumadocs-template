@@ -6,11 +6,7 @@ import type { ReactNode } from "react";
 import type { SharedProps } from "fumadocs-ui/components/dialog/search";
 import type { ComponentType } from "react";
 
-const SearchDialog = dynamic(
-  () => import("@/components/search"),
-  { ssr: false }
-) as ComponentType<SharedProps>;
-
+import DefaultSearchDialog as SearchDialog from "@/components/search"
 export function Provider({ children }: { children: ReactNode }) {
   return (
     <RootProvider search={{ SearchDialog }}>
