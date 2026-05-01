@@ -28,10 +28,12 @@ import { useParams } from "next/navigation";
 import { cn } from "@/lib/cn";
 
 function initOrama() {
-  return create({
+  const res = create({
     schema: { _: "string" },
     language: "english",
   });
+
+  return res;
 }
 
 type FilterItem = {
@@ -101,7 +103,7 @@ export default function DefaultSearchDialog(props: SharedProps) {
     type: "static",
     initOrama,
     locale: "en",
-    from: `${siteConfig.basePath}/api/search/`,
+    from: `${siteConfig.basePath}/api/search`,
     tag: effectiveTag,
   });
 
