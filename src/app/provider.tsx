@@ -6,7 +6,7 @@ import type { ReactNode } from "react";
 import type { SharedProps } from "fumadocs-ui/components/dialog/search";
 import type { ComponentType } from "react";
 
-import DefaultSearchDialog as SearchDialog from "@/components/search"
+import {DefaultSearchDialog as SearchDialog} from "@/components/search"
 export function Provider({ children }: { children: ReactNode }) {
   return (
     <RootProvider search={{ SearchDialog }}>
