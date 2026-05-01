@@ -13,6 +13,7 @@ import {
   type SharedProps,
 } from "fumadocs-ui/components/dialog/search";
 import { useDocsSearch } from "fumadocs-core/search/client";
+import { create } from "@orama/orama";
 import {
   Popover,
   PopoverTrigger,
@@ -21,11 +22,17 @@ import {
 import { buttonVariants } from "fumadocs-ui/components/ui/button";
 import { ChevronDown } from "lucide-react";
 import { PROJECTS, siteConfig } from "__CONFIG__";
-import { SOURCE_REGISTRY } from "@/lib/sources";
+import { getSections } from "@/lib/sections";
 import { useState, useMemo } from "react";
 import { useParams } from "next/navigation";
 import { cn } from "@/lib/cn";
-import { create } from "@orama/orama";
+
+function initOrama() {
+  return create({
+    schema: { _: "string" },
+    language: "english",
+  });
+}
 
 type FilterItem = {
   name: string;
@@ -36,43 +43,41 @@ type FilterItem = {
 
 export default function DefaultSearchDialog(props: SharedProps) {
   const [open, setOpen] = useState(false);
-  const [tag, setTag] = useState<string | undefined>();
+  const [tag, setTag] = useState<string | undefined>(undefined);
   const params = useParams();
 
-  // Detect current project from URL params
   const currentProject = typeof params.project === "string"
     ? params.project
     : undefined;
 
-  // Build contextual filter items based on current project
   const items = useMemo<FilterItem[]>(() => {
     const list: FilterItem[] = [
       { name: "All Projects", value: undefined },
     ];
 
-    if (currentProject && currentProject in SOURCE_REGISTRY) {
-      const source = SOURCE_REGISTRY[currentProject];
+    if (currentProject) {
       const projectConfig = PROJECTS.find((p) => p.slug === currentProject);
+      if (!projectConfig) return list;
 
-      // Project-level filter (all pages in this project)
+      // Project-level group item
       list.push({
-        name: projectConfig?.label ?? currentProject,
+        name: projectConfig.label,
         value: currentProject,
-        description: `All ${projectConfig?.label ?? currentProject} pages`,
+        description: `All ${projectConfig.label} pages`,
         isGroup: true,
       });
 
-      // Page-level filters (individual pages in this project)
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      source.getPages().forEach((page: any) => {
+      // Section-level items — auto-detected from content subfolders
+      getSections(currentProject).forEach((section) => {
         list.push({
-          name: page.data.title,
-          value: `${currentProject}/${page.slugs.join("/")}`,
-          description: page.url,
+          name: section.label,
+          value: `${currentProject}/${section.slug}`,
+          description: `/${currentProject}/${section.slug}/...`,
+          isGroup: false,
         });
       });
     } else {
-      // Not on a project route — show all projects as group filters
+      // Not on a project route — show all projects
       PROJECTS.forEach((p) => {
         list.push({
           name: p.label,
@@ -86,23 +91,22 @@ export default function DefaultSearchDialog(props: SharedProps) {
     return list;
   }, [currentProject]);
 
-  // Default tag to current project when dialog opens on a project route
-  const effectiveTag = tag ?? (currentProject ? currentProject : undefined);
-
-  function initOrama() {
-    return create({
-      schema: { _: "string" },
-      language: "english",
-    });
-  }
+  // Default to current project scope when on a project route
+  // Explicit tag=undefined means "All Projects" was selected
+  const effectiveTag = tag !== undefined
+    ? tag
+    : currentProject ?? undefined;
 
   const { search, setSearch, query } = useDocsSearch({
     type: "static",
-    locale: "en",
     initOrama,
+    locale: "en",
     from: `${siteConfig.basePath}/api/search/`,
     tag: effectiveTag,
   });
+
+  const selectedLabel =
+    items.find((item) => item.value === effectiveTag)?.name ?? "All Projects";
 
   return (
     <SearchDialog
@@ -118,7 +122,9 @@ export default function DefaultSearchDialog(props: SharedProps) {
           <SearchDialogInput />
           <SearchDialogClose />
         </SearchDialogHeader>
-        <SearchDialogList items={query.data !== "empty" ? query.data : null} />
+        <SearchDialogList
+          items={query.data !== "empty" ? query.data : null}
+        />
         <SearchDialogFooter className="flex flex-row flex-wrap gap-2 items-center">
           <Popover open={open} onOpenChange={setOpen}>
             <PopoverTrigger
@@ -128,8 +134,10 @@ export default function DefaultSearchDialog(props: SharedProps) {
                 className: "-m-1.5 me-auto",
               })}
             >
-              <span className="text-fd-muted-foreground/80 me-2">Filter</span>
-              {items.find((item) => item.value === effectiveTag)?.name ?? "All Projects"}
+              <span className="text-fd-muted-foreground/80 me-2">
+                Filter
+              </span>
+              {selectedLabel}
               <ChevronDown className="size-3.5 text-fd-muted-foreground" />
             </PopoverTrigger>
             <PopoverContent
@@ -142,30 +150,36 @@ export default function DefaultSearchDialog(props: SharedProps) {
                   <button
                     key={i}
                     onClick={() => {
-                      // clicking current project group → set to project tag
-                      // clicking "All Projects" → clear tag
                       setTag(item.value);
                       setOpen(false);
                     }}
                     className={cn(
                       "rounded-lg text-start px-2 py-1.5",
-                      item.isGroup && "mt-1 border-t border-fd-border pt-2 first:border-0 first:mt-0",
+                      item.isGroup &&
+                      "mt-1 border-t border-fd-border pt-2 first:border-0 first:mt-0",
                       isSelected
                         ? "text-fd-primary bg-fd-primary/10"
                         : "hover:text-fd-accent-foreground hover:bg-fd-accent",
                     )}
                   >
-                    <p className={cn(
-                      "mb-0.5",
-                      item.isGroup ? "font-semibold text-sm" : "font-medium text-sm pl-2"
-                    )}>
-                      {item.isGroup ? "▸ " : ""}{item.name}
+                    <p
+                      className={cn(
+                        "mb-0.5",
+                        item.isGroup
+                          ? "font-semibold text-sm"
+                          : "font-medium text-sm pl-3",
+                      )}
+                    >
+                      {item.isGroup ? "▸ " : "· "}
+                      {item.name}
                     </p>
                     {item.description && (
-                      <p className={cn(
-                        "text-xs opacity-70",
-                        !item.isGroup && "pl-2"
-                      )}>
+                      <p
+                        className={cn(
+                          "text-xs opacity-70",
+                          !item.isGroup && "pl-3",
+                        )}
+                      >
                         {item.description}
                       </p>
                     )}
@@ -186,4 +200,4 @@ export default function DefaultSearchDialog(props: SharedProps) {
       </SearchDialogContent>
     </SearchDialog>
   );
-}
+} a
