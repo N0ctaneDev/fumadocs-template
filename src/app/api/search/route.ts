@@ -18,9 +18,9 @@ const indexes = Object.entries(SOURCE_REGISTRY).flatMap(
         // Project-level tag — "docs", "n0shop"
         {
           title: page.data.title,
-          description: page.data.description,
+          description: page.data.description ?? "",
           url: page.url,
-          id: `${page.url}`,
+          id: `project::${projectSlug}::${page.url}`,
           structuredData: page.data.structuredData,
           tag: projectSlug,
         },
@@ -31,9 +31,9 @@ const indexes = Object.entries(SOURCE_REGISTRY).flatMap(
       if (section) {
         entries.push({
           title: page.data.title,
-          description: page.data.description,
+          description: page.data.description ?? "",
           url: page.url,
-          id: `${page.url}`,
+          id: `section::${projectSlug}/${section}::${page.url}`,
           structuredData: page.data.structuredData,
           tag: `${projectSlug}/${section}`,
         });
