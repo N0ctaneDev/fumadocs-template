@@ -1,48 +1,47 @@
-// src/app/api/search/route.ts
-
 import { SOURCE_REGISTRY } from "@/lib/sources";
 import { createSearchAPI } from "fumadocs-core/search/server";
 
 export const revalidate = false;
 
-// Each page gets TWO index entries:
-// 1. Tagged with projectSlug       → for "filter by project" 
-// 2. Tagged with project/pageSlug  → for "filter by specific page"
-// Different ids so they don't dedupe, but same url for navigation.
 const indexes = Object.entries(SOURCE_REGISTRY).flatMap(
   ([projectSlug, source]) =>
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     source.getPages().flatMap((page: any) => {
+      // section = first slug segment e.g. "install", "setup"
+      // falls back to projectSlug if page is at root (no subfolders)
+      const section = page.slugs.length > 1
+        ? page.slugs[0]
+        : null;
 
-      // DEBUG — remove after confirming
-      console.log(`[search] ${projectSlug} | ${page.url} | structuredData:`,
-        page.data.structuredData ? "✅" : "❌ MISSING"
-      );
-
-      return [
+      const entries = [
         // Entry 1 — project-level tag
         {
           title: page.data.title,
           description: page.data.description ?? "",
           url: page.url,
-          id: `${projectSlug}::${page.url}`,
+          id: `project::${projectSlug}::${page.url}`,
           structuredData: page.data.structuredData,
           tag: projectSlug,
         },
-        // Entry 2 — page-level tag
-        {
+      ];
+
+      // Entry 2 — section-level tag (only if page is inside a subfolder)
+      if (section) {
+        entries.push({
           title: page.data.title,
           description: page.data.description ?? "",
           url: page.url,
-          id: `${projectSlug}/${page.slugs.join("/")}::${page.url}`,
+          id: `section::${projectSlug}/${section}::${page.url}`,
           structuredData: page.data.structuredData,
-          tag: `${projectSlug}/${page.slugs.join("/")}`,
-        },
-      ]
+          tag: `${projectSlug}/${section}`,
+        });
+      }
+
+      return entries;
     })
 );
 
 export const { staticGET: GET } = createSearchAPI("advanced", {
   language: "english",
   indexes,
-}); 
+});
