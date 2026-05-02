@@ -77,12 +77,13 @@ export default function DefaultSearchDialog(props: SharedProps) {
         });
       });
     } else {
+      list.push({name: "All Stuff", value: undefined, description: "Search All Across the wiki", isGroup:true,});
       // Not on a project route — show all projects
       PROJECTS.forEach((p) => {
         list.push({
           name: p.label,
           value: p.slug,
-          description: `/${p.slug} docs`,
+          description: `In /${p.slug} docs`,
           isGroup: true,
         });
       });
