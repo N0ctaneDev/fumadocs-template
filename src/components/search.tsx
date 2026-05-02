@@ -53,9 +53,7 @@ export default function DefaultSearchDialog(props: SharedProps) {
     : undefined;
 
   const items = useMemo<FilterItem[]>(() => {
-    const list: FilterItem[] = [
-      { name: "All Projects", value: undefined },
-    ];
+    const list: FilterItem[] = [];
 
     if (currentProject) {
       const projectConfig = PROJECTS.find((p) => p.slug === currentProject);
@@ -136,7 +134,7 @@ export default function DefaultSearchDialog(props: SharedProps) {
               })}
             >
               <span className="text-fd-muted-foreground/80 me-2">
-                Filter
+                Filter (where to search)
               </span>
               {selectedLabel}
               <ChevronDown className="size-3.5 text-fd-muted-foreground" />
