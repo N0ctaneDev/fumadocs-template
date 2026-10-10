@@ -1,5 +1,5 @@
 {
-  "name": "fumadocs-template",
+  "name": "n0ctdocs",
   "version": "0.1.0",
   "description": "A modern documentation website template built with Next.js and Fumadocs",
   "private": true,
@@ -9,15 +9,16 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/n0ctanedev/fumadocs-template.git"
+    "url": "https://github.com/n0ctanedev/n0ctdocs.git"
   },
-  "homepage": "https://n0ctanedev.github.io/fumadocs-template",
+  "homepage": "https://n0ctanedev.github.io/n0ctdocs",
   "bugs": {
-    "url": "https://github.com/n0ctanedev/fumadocs-template/issues"
+    "url": "https://github.com/n0ctanedev/n0ctdocs/issues"
   },
-  "author": "n0ctanedev",
+  "author": "N0ctaneDev",
   "license": "MIT",
   "keywords": [
+    "n0ctdocs",
     "fumadocs",
     "next.js",
     "documentation",

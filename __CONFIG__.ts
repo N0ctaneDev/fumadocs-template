@@ -1,15 +1,15 @@
 // meta data
 export const siteMetadata = {
-  title: "Fumadocs-Template by N0ctaneDev",
+  title: "An Extended Fork of Fumadocs by N0ctaneDev",
   description:
-    "A morden Static Site Template built with Fumadocs, Next.js and Tailwind CSS. built to host on github pages.",
-  keywords: "Fumadocs, Next.js, Tailwind CSS, github pages",
+    "A morden Static Site Template built with Fumadocs, Next.js and Tailwind CSS. built to host on github pages. This extended fork allows multi project architectured docs",
+  keywords: "N0ctDocs, n0ctdocs, n0ct docs, Fumadocs, Next.js, Tailwind CSS, github pages",
   author: "N0ctaneDev",
 };
 
 // github config
 export const githubConfig = {
-  repo: "fumadocs-template",
+  repo: "n0ctdocs",
   owner: "n0ctanedev",
   branch: "main",
 };
@@ -17,7 +17,7 @@ export const githubConfig = {
 // site config
 export const siteConfig = {
   basePath: `/${githubConfig.repo}`, // set it to '' if you want to deploy to root (https://username.github.io/)
-  name: "Fumadocs Template", // shown on the navbar and used as default title suffix
+  name: "N0ctDocs - Extended Fumadocs Template", // shown on the navbar and used as default title suffix
 };
 
 //the folders in /content... u can make separate folders for diff projects and add them here
@@ -37,7 +37,7 @@ export const PROJECTS: ProjectConfig[] = [
 // social + SEO config
 export const socialConfig = {
   /** Your deployed URL — no trailing slash */
-  siteUrl: "https://n0ctanedev.github.io/fumadocs-template",
+  siteUrl: "https://n0ctanedev.github.io/n0ctdocs",
 
   /** Twitter/X handle — include the @ */
   twitterHandle: "@n0ctanedev",
