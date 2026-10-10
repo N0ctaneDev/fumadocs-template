@@ -4,7 +4,7 @@
 
 # Hellow Fellas
 
-[go here to test the N0shop route](https://n0ctanedev.github.io/fumadocs-template/n0shop)
+[go here to test the N0shop route](../n0shop/index.mdx)
 
 
 # normal hai bhai
@@ -13,7 +13,7 @@
 
 # Hellow Fellas
 
-[go here to test the docs route](https://n0ctanedev.github.io/fumadocs-template/docs)
+[go here to test the docs route](https://n0ctanedev.github.io/n0ctdocs/docs)
 
 
 # Components
