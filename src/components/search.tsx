@@ -98,11 +98,20 @@ export default function DefaultSearchDialog(props: SharedProps) {
     ? tag
     : currentProject ?? undefined;
 
+  // Divisioned search: each scope has its own static DB.
+  // - "all" (no tag) → /api/search (title+description only)
+  // - "docs", "docs/shell", ... → /api/search/<scope> (full in-scope + names out-of-scope)
+  // The DB is already scoped, so no Orama tag filter is needed.
+  const scopePath = effectiveTag ?? "all";
+  const searchFrom = scopePath === "all"
+    ? `${siteConfig.basePath}/api/search`
+    : `${siteConfig.basePath}/api/search/${scopePath}`;
+
   const { search, setSearch, query } = useDocsSearch({
     type: "static",
     initOrama,
-    from: `${siteConfig.basePath}/api/search`,
-    tag: effectiveTag,
+    from: searchFrom,
+    tag: undefined,
   });
 
   const selectedLabel =
