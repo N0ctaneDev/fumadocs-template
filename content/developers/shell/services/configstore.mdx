@@ -1,0 +1,2687 @@
+---
+title: "ConfigStore Service"
+description: "ConfigStore.qml is N0ctOS's underlying configuration engine."
+---
+
+`ConfigStore.qml` is N0ctOS's underlying configuration engine.
+
+> **Relationship to `config.mdx`: that document claims "`ConfigStore` covered inside" but only covers the `Config` facade.** This document covers the actual store: file ownership, per-file controllers, documents, history, the write queue, watching, and IPC. `Config.qml` is the public/convenient API; `ConfigStore.qml` is the backing store and the IPC owner.
+
+It gives services (and advanced components) one consistent engine for loading, tracking, modifying, saving, watching, and managing JSON configuration files without creating `FileView` objects or implementing persistence logic directly.
+
+The service supports multiple registered configuration files, reactive documents, per-file state, autosave-everything with explicit `save()` checkpoints, delta-based undo/redo/revert history, file watching with debounced reloads, atomic writes with a save queue, a path registry with CRUD, debug logging, and a full IPC interface.
+
+The normal usage pattern is:
+
+```text
+Component / Service
+    │
+    ▼
+Config (public API)
+    │
+    ▼
+ConfigStore (backing store + IPC owner)
+    │
+    ├── path registry
+    ├── per-file controllers (Instantiator)
+    ├── reactive documents + states
+    ├── history + baselines
+    ├── watchers + debounce + write queue
+    └── IPC (n0ctos-config)
+    │
+    ▼
+JSON configuration files
+```
+
+Direct use of `ConfigStore` is supported and documented below. Prefer `Config` for everyday reads/writes; reach for `ConfigStore` when you need controller fields, debug control, `documentUpdated` semantics, or store-level insight.
+
+---
+
+# 1. What does it do?
+
+`ConfigStore.qml` sits between `Config.qml` (and IPC) and the filesystem.
+
+A service can read:
+
+```qml
+ConfigStore.get(
+    "notifications.isDnd",
+    false
+)
+```
+
+or write:
+
+```qml
+ConfigStore.set(
+    "notifications.isDnd",
+    true
+)
+```
+
+A configuration document can contain simple values:
+
+```json
+{
+    "notifications": {
+        "isDnd": true
+    }
+}
+```
+
+or nested sections:
+
+```json
+{
+    "notifications": {
+        "popup": {
+            "timeout": {
+                "normal": 5
+            }
+        }
+    }
+}
+```
+
+A secondary file can be selected with a file key:
+
+```json
+{
+    "wifi": {
+        "enabled": true
+    }
+}
+```
+
+read as:
+
+```qml
+ConfigStore.get(
+    "wifi.enabled",
+    true,
+    "networkConfig"
+)
+```
+
+The effective file is resolved in this order:
+
+```text
+requested fileKey
+    ↓
+registered?
+    ↓
+yes -> requested file
+no  -> homeConfig (with a one-time warning per unknown key)
+```
+
+So a service can simply do:
+
+```qml
+ConfigStore.get(
+    "audio.volume",
+    100
+)
+```
+
+and not care where the file lives, how it is watched, or how it is written.
+
+If that property does not exist, the fallback is returned.
+
+If an unknown file key is supplied to a normal configuration operation, `homeConfig` is used instead (and a warning is emitted once per key):
+
+```qml
+ConfigStore.get(
+    "some.value",
+    false,
+    "doesNotExist"
+)
+```
+
+resolves to:
+
+```text
+~/.config/N0ctOS/config.json
+```
+
+Path-registry operations are different. They use exact key matching and do not fall back:
+
+```qml
+ConfigStore.hasPath(
+    "doesNotExist"
+)
+```
+
+returns `false` instead of operating on `homeConfig`.
+
+## Config vs. ConfigStore
+
+| Aspect | `Config.qml` | `ConfigStore.qml` (this document) |
+| --- | --- | --- |
+| Role | Public / convenient API | Backing store + IPC owner |
+| File ownership | None (forwards to the store) | Owns documents, paths, `FileView`s, watchers, queues |
+| Debug control | `isDebugLogging` is a read-only mirror | `isDebugLogging` is writable (`true` default) |
+| Signals | `documentChanged(fileKey)`, `externalReload()`, `externalReloadFor(fileKey)`, `saveError(reason)`, `saveErrorFor(fileKey, reason)` | `documentUpdated(fileKey)`, `externalReload(fileKey)`, `saveError(fileKey, reason)` |
+| IPC | None | `n0ctos-config` (~40 ops) |
+| Direct use | Everyday component/service code | Backing-store access, controller fields, debugging, IPC behavior |
+
+`Config.documentChanged(fileKey)` and `ConfigStore.documentUpdated(fileKey)` fire on the same document replacements, but they are different signals on different singletons: the facade re-emits store activity with its own naming. `Config.externalReload()` (no-arg, any file) vs. `ConfigStore.externalReload(fileKey)` (which file) follow the same pattern.
+
+---
+
+# 2. UI API
+
+Import normally:
+
+```qml
+import QtQuick
+import Quickshell
+
+import qs.services
+```
+
+Direct store use is explicit:
+
+```qml
+ConfigStore.get("audio.volume", 100)
+ConfigStore.set("audio.volume", 80)
+```
+
+## Core API
+
+| How to read | What does it do |
+| --- | --- |
+| `ConfigStore.isDebugLogging` | Writable debug flag (default `true`). Warnings/errors always emit regardless. Set to `false` to silence lifecycle logs. |
+| `ConfigStore.homeDir` | `String(Quickshell.env("HOME") \|\| "")`. |
+| `ConfigStore.xdgConfigHome` | `XDG_CONFIG_HOME`, else `homeDir + "/.config"`. |
+| `ConfigStore.defaultFileKey` | `"homeConfig"`. |
+| `ConfigStore.defaultHomeConfigPath` | `xdgConfigHome + "/N0ctOS/config.json"`. |
+| `ConfigStore.paths` | Registered file-key table (`key -> resolved physical path`). Reactive. |
+| `ConfigStore.pathKeys` | List of registered configuration keys. Reactive (drives the controller `Instantiator`). |
+| `ConfigStore.documents` | Currently loaded documents indexed by file key. Reactive. |
+| `ConfigStore.document` | Snapshot of the default file document (`documentFor("homeConfig")`). Reactive. |
+| `ConfigStore.historyLimit` | `100`. Applies to `past + future` combined, per file. |
+| `ConfigStore.isReady` | `true` when the default document has been loaded and initialized. |
+| `ConfigStore.isWriting` | `true` while the default file has a write pipeline active (`writing`/`writePending`/queued text). |
+| `ConfigStore.isDirty` | `true` when the default document differs from its last `save()`/load baseline. Autosave already wrote the file; `save()` clears this. |
+| `ConfigStore.revision` | Revision number of the default document. Increases when the in-memory document changes. |
+| `ConfigStore.configPath` | Resolved physical path of `homeConfig`. |
+| `ConfigStore.isReadyFor(fileKey)` | `true` when the given file is ready. Unknown keys fall back to `homeConfig`. |
+| `ConfigStore.isWritingFor(fileKey)` | `true` while the given file has a write pipeline active. Unknown keys fall back to `homeConfig`. |
+| `ConfigStore.isDirtyFor(fileKey)` | `true` when the given file differs from its baseline. Unknown keys fall back to `homeConfig`. |
+| `ConfigStore.revisionFor(fileKey)` | Revision number for the given file, `0` when no state exists. Unknown keys fall back to `homeConfig`. |
+
+## Reads
+
+| How to call | What does it do |
+| --- | --- |
+| `ConfigStore.get(dataPath, fallbackValue, fileKey)` | Reads a value at a dotted data path. Returns `fallbackValue` when missing or when the path is empty. Unknown `fileKey` warns once, then falls back to `homeConfig`. |
+| `ConfigStore.has(dataPath, fileKey)` | Checks whether a property exists (sentinel-based, so stored `undefined`-shaped gaps still report correctly). Unknown `fileKey` warns once, then falls back to `homeConfig`. |
+| `ConfigStore.documentFor(fileKey)` | Returns a snapshot clone of the complete document for a file key. Mutating the returned object never affects the store; use `set()`/`update()`/`remove()`/`undo()`/`redo()`/`revert()`. Unknown `fileKey` warns once, then falls back to `homeConfig`. Returns `{}` when no document exists. |
+| `ConfigStore.historyAt(fileKey)` | `{past:[...], future:[...], canUndo, canRedo, count, limit, isDirty}` for the file. Each entry is `{op, dataPath, changeCount, changes:[{path, beforeExists, beforeValue, afterExists, afterValue}]}`. `future[0]` is the next redo. Unknown keys fall back to `homeConfig`. |
+| `ConfigStore.historyFor(fileKey)` | Alias of `historyAt()`. Kept for convenience. |
+
+| Example | Result |
+| --- | --- |
+| `ConfigStore.get("notifications.isDnd", false)` | Stored value, or `false` when missing |
+| `ConfigStore.get("wifi.enabled", true, "networkConfig")` | Stored value from `networkConfig`, or `true` when missing; `homeConfig` value when key is unknown |
+| `ConfigStore.has("notifications.isDnd")` | `true` when the property exists, `false` when it does not |
+| `ConfigStore.documentFor("networkConfig")` | Full document snapshot (read-only: mutate via `set()`/`update()`/`remove()`, never by editing the returned object) |
+| `ConfigStore.historyAt("networkConfig")` | history detail for `networkConfig` |
+| `ConfigStore.historyFor("networkConfig")` | same as `historyAt()` |
+| `ConfigStore.isReadyFor("networkConfig")` | `true` when ready |
+| `ConfigStore.isWritingFor("networkConfig")` | `true` while writing |
+| `ConfigStore.isDirtyFor("networkConfig")` | `true` when unsaved changes exist |
+| `ConfigStore.revisionFor("networkConfig")` | revision number, `0` when no state exists |
+
+## Writes
+
+| How to call | What does it do |
+| --- | --- |
+| `ConfigStore.set(dataPath, value, fileKey)` | Creates or updates one value. Missing intermediate objects are created automatically. Autosaves immediately (memory + disk write queued). No-op (`true`, no write, no revision) when already equal. Rejects empty paths and `undefined` values. Unknown `fileKey` warns once, then falls back to `homeConfig`. |
+| `ConfigStore.update(dataPath, value, fileKey)` | Deep-merges an object value into a data path, then persists through the normal autosave path. Requires a non-empty path and an object value. Unknown `fileKey` warns once, then falls back to `homeConfig`. |
+| `ConfigStore.remove(dataPath, fileKey)` | Deletes a nested property and autosaves. Returns `false` and changes nothing when the path does not exist. Unknown `fileKey` warns once, then falls back to `homeConfig`. |
+
+| Example | Result |
+| --- | --- |
+| `ConfigStore.set("notifications.isDnd", true)` | `true` and document changed plus autosave write queued; `true` with no write/revision when already equal; `false` on empty path or `undefined` value |
+| `ConfigStore.update("notifications", {"isDnd": true})` | `true` and value deep-merged plus autosave write queued; `false` when path is empty or value is not an object |
+| `ConfigStore.remove("notifications.isDnd")` | `true` and property deleted plus autosave write queued; `false` when the path did not exist |
+
+There are no `setAt` / `updateAt` / `removeAt` / `getAt` QML variants on the store itself: the `fileKey` third (or second) parameter already selects the file. The `*At` naming exists only on the IPC layer (`getAt`, `setJsonAt`, `updateJsonAt`, `removeAt`, `saveAt`, `reloadAt`, `isReadyAt`, and so on).
+
+## Undo history
+
+Model: **autosave everything + explicit checkpoint**. Every `set()`/`update()`/`remove()`/`undo()`/`redo()`/`revert()` updates memory *and* immediately queues a disk write. `isDirty` means "document differs from the last `save()`/load baseline", not "disk differs" — after autosave the file already matches memory, but the file stays dirty until `save()` establishes a new baseline and wipes history.
+
+Each mutation records one compact forward-delta entry (`past`), up to `historyLimit` (100) entries for `past + future` combined. When over the limit the oldest `past` entry is discarded first so redo is preserved. A new mutation clears `future` (kills redo). `save()` and `revert()` wipe both stacks.
+
+| How to call | What does it do |
+| --- | --- |
+| `ConfigStore.undo(fileKey)` | Moves the newest `past` entry to `future`, restores its before-values, autosaves. Returns `false` when `past` is empty or the file is not ready. A no-op undo (entry resolves to the current document) still advances the stack but skips write/revision. Any undo cancels a pending `save()` checkpoint. Defaults to `homeConfig`. |
+| `ConfigStore.redo(fileKey)` | Moves the newest `future` entry back to `past`, restores its after-values, autosaves. Returns `false` when `future` is empty or the file is not ready. No-op redos advance the stack without write/revision. A new `set()`/`update()`/`remove()` clears `future`. Defaults to `homeConfig`. |
+| `ConfigStore.revert(fileKey)` | Logically `while (canUndo) undo()`: replays every `past` before-value in reverse to restore the clean baseline, coalesced into a **single** document commit (single write, single revision, single `documentUpdated`). Then wipes `past + future`. Returns `false` when not ready, or when `past` is empty *and* already clean. Undone-to-clean with redo available wipes without disk IO. Defaults to `homeConfig`. |
+| `ConfigStore.save(fileKey)` | True checkpoint. Fails (`false`) when not ready. Clean + empty history: `true` no-op, no IO. Clean with leftover history (e.g. undo-to-clean leaves redo): wipes history, `true`, no IO, no revision. Dirty + write pipeline active: marks checkpoint-when-idle and ensures the newest state is queued; baseline/history reset in `onSaved`. Dirty + idle + last write failed: forces a rewrite, checkpoint on `onSaved`. Dirty + idle + disk already matches (normal autosave case): sets baseline + wipes history synchronously, `true`, no IO. |
+
+## File control
+
+| How to call | What does it do |
+| --- | --- |
+| `ConfigStore.save(fileKey)` | True checkpoint (see Undo history). Defaults to `homeConfig`. Normal `set()`/`update()`/`remove()` already autosave; `save()` only moves the baseline and wipes history. |
+| `ConfigStore.reload(fileKey)` | Explicitly reloads one file from disk (`controller.forceReload()`). Discards unsaved local state for that file (baseline = disk, history wiped). Defaults to `homeConfig`. Rejected while the write pipeline is active. |
+| `ConfigStore.reloadAll()` | Reloads every registered file. Skips files currently being written. |
+
+| Example | Result |
+| --- | --- |
+| `ConfigStore.save()` | `true` checkpoint for `homeConfig`; `false` when no controller exists or not ready |
+| `ConfigStore.save("networkConfig")` | `true` checkpoint for `networkConfig`; `false` when no controller exists or not ready |
+| `ConfigStore.reload()` | `true` and `homeConfig` reloaded (local dirty state discarded); `false` while writing or when no controller exists |
+| `ConfigStore.reload("networkConfig")` | `true` and `networkConfig` reloaded; `false` while writing or when no controller exists |
+| `ConfigStore.reloadAll()` | `true` when every file reloaded; `false` when one or more files were skipped or failed |
+
+## Path registry
+
+| How to call | What does it do |
+| --- | --- |
+| `ConfigStore.registerPath(fileKey, fsPath)` | Registers one logical file key and creates its document, state, baseline, history, and (via `pathKeys`) its controller. Same key plus same path is idempotent (`true`). Rejects empty keys/paths, same key with a different path, and duplicate physical paths. |
+| `ConfigStore.registerPaths(pathTable)` | Registers multiple files at once. Requires an object. Returns `false` when one or more entries fail (still registers the ones that succeed). |
+| `ConfigStore.hasPath(fileKey)` | Registry lookup. Returns `true` when the key is registered, `false` otherwise (including empty keys). Does not fall back to `homeConfig`. |
+| `ConfigStore.pathFor(fileKey)` | Returns the resolved physical path for a key. Unknown keys resolve to the `homeConfig` path (with a one-time warning). |
+| `ConfigStore.updatePath(fileKey, fsPath)` | Changes the physical path of an existing non-default key, discards its old document, resets state/history/baseline, resets the controller's directory/write flags, and force-reloads the new file. Rejects `homeConfig`, unregistered keys, empty paths, active write pipelines / dirty-write state, and duplicate physical paths. Same-path updates are a `true` no-op. |
+| `ConfigStore.removePath(fileKey)` | Removes a non-default key plus its document, state, history, baseline, and (via `pathKeys`) its controller. Leaves the physical file untouched. Rejects `homeConfig`, unregistered keys, and active write pipelines / dirty-write state. |
+
+| Example | Result |
+| --- | --- |
+| `ConfigStore.registerPath("networkConfig", "~/.config/N0ctOS/network.json")` | `true` and key registered plus controller created; `true` when already registered with the same path; `false` on empty key/path, conflicting path, or duplicate physical path |
+| `ConfigStore.registerPaths({networkConfig: "~/.config/N0ctOS/network.json"})` | `true` when every entry registered; `false` when one or more entries failed or the table is not an object |
+| `ConfigStore.hasPath("networkConfig")` | `true` when registered, `false` otherwise (no fallback) |
+| `ConfigStore.pathFor("networkConfig")` | Resolved path, e.g. `"/home/user/.config/N0ctOS/network.json"`; `homeConfig` path when the key is unknown |
+| `ConfigStore.updatePath("networkConfig", "~/.config/N0ctOS/network-v2.json")` | `true` and mapping replaced plus old document discarded plus new file loaded; `false` for `homeConfig`, unregistered keys, active write pipeline/dirty-write state, or duplicate physical paths |
+| `ConfigStore.removePath("networkConfig")` | `true` and registry entry, document, state, history, baseline, and controller removed (physical file remains); `false` for `homeConfig`, unregistered keys, or active write pipeline/dirty-write state |
+
+Path expansion understands:
+
+```text
+~
+$HOME
+${HOME}
+$XDG_CONFIG_HOME
+${XDG_CONFIG_HOME}
+```
+
+Relative paths resolve relative to the home directory.
+
+## Signals
+
+| How to listen | What does it do |
+| --- | --- |
+| `ConfigStore.documentUpdated(fileKey)` | Emitted when a document is replaced (local write, undo/redo/revert, or external reload). This is the store-level signal; `Config.documentChanged(fileKey)` is the facade-level equivalent. |
+| `ConfigStore.externalReload(fileKey)` | Emitted when the given file finishes an external (watcher or explicit) reload. Unlike `Config.externalReload()` (no-arg, any file), the store signal names the file. |
+| `ConfigStore.saveError(fileKey, reason)` | Emitted when the given file fails to save or create its directory. Unlike `Config.saveError(reason)` (no file key), the store signal names the file. |
+
+### Typical direct use
+
+```qml
+readonly property bool isDnd:
+    ConfigStore.get(
+        "notifications.isDnd",
+        false
+    )
+
+readonly property string netPath:
+    ConfigStore.pathFor(
+        "networkConfig"
+    )
+
+readonly property var netDoc:
+    ConfigStore.documentFor(
+        "networkConfig"
+    )
+```
+
+That is the intended direct-store usage.
+
+Everyday component code should normally use `Config` instead and never touch controllers, baselines, or history directly.
+
+---
+
+# 3. IPC API
+
+IPC target:
+
+```text
+n0ctos-config
+```
+
+`ConfigStore` owns the IPC layer. `Config.qml` exposes no `IpcHandler`. The IPC layer exposes high-level configuration operations. A terminal command does not need to know about `FileView`, JSON parsing, watchers, write queues, atomic writes, or document objects.
+
+## Core CRUD
+
+| How to call | What does it do |
+| --- | --- |
+| `get <dataPath>` | Reads a value from `homeConfig` as JSON. Returns `""` when missing or unserializable. |
+| `getDocument` | Reads the whole `homeConfig` document as JSON. Returns `""` on failure. |
+| `history` | Returns `{past, future, canUndo, canRedo, count, limit, isDirty}` for `homeConfig` as JSON. Returns `""` on failure. |
+| `has <dataPath>` | Checks whether a value exists in `homeConfig`. |
+| `setJson <dataPath> <json>` | Parses `<json>` and writes it to `homeConfig`. Returns `false` on invalid JSON or rejected write. |
+| `updateJson <dataPath> <json-object>` | Deep-merges a JSON object value into a `homeConfig` data path. Rejects non-object values. |
+| `remove <dataPath>` | Deletes a value from `homeConfig`. |
+
+| Example | Result |
+| --- | --- |
+| `qs ipc call n0ctos-config get notifications.isDnd` | `"true"` (JSON value), or `""` when missing |
+| `qs ipc call n0ctos-config getDocument` | Whole `homeConfig` document as JSON, or `""` on failure |
+| `qs ipc call n0ctos-config history` | history JSON for `homeConfig`, or `""` on failure |
+| `qs ipc call n0ctos-config has notifications.isDnd` | `"true"` when it exists, `"false"` when it does not |
+| `qs ipc call n0ctos-config setJson notifications.isDnd true` | `"true"` and value written plus autosave write queued; `"false"` on invalid JSON or rejected write |
+| `qs ipc call n0ctos-config updateJson notifications '{"isDnd":true}'` | `"true"` and value merged plus autosave write queued; `"false"` on invalid JSON or non-object value |
+| `qs ipc call n0ctos-config remove notifications.isDnd` | `"true"` and property deleted plus autosave write queued; `"false"` when the path does not exist |
+
+`<json>` must be valid JSON.
+
+For example:
+
+```bash
+qs ipc call n0ctos-config setJson \
+    notifications \
+    '{"isDnd":true,"timeout":5}'
+```
+
+Boolean:
+
+```bash
+qs ipc call n0ctos-config setJson \
+    notifications.isDnd \
+    true
+```
+
+Number:
+
+```bash
+qs ipc call n0ctos-config setJson \
+    audio.volume \
+    80
+```
+
+String:
+
+```bash
+qs ipc call n0ctos-config setJson \
+    wallpaper.mode \
+    '"random"'
+```
+
+Object value:
+
+```bash
+qs ipc call n0ctos-config updateJson \
+    notifications \
+    '{"isDnd":true,"timeout":5}'
+```
+
+Read a value:
+
+```bash
+qs ipc call n0ctos-config get \
+    notifications.isDnd
+```
+
+returns:
+
+```text
+true
+```
+
+or an empty string when the property does not exist.
+
+Check existence:
+
+```bash
+qs ipc call n0ctos-config has \
+    notifications.isDnd
+```
+
+returns:
+
+```text
+true
+```
+
+or:
+
+```text
+false
+```
+
+## State and paths
+
+| How to call | What does it do |
+| --- | --- |
+| `isReady` | Returns whether `homeConfig` is ready. |
+| `isWriting` | Returns whether `homeConfig` is writing. |
+| `isDirty` | Returns whether `homeConfig` has uncommitted change history. |
+| `getPath` | Returns the resolved `homeConfig` path. |
+| `getRevision` | Returns the `homeConfig` revision number. |
+
+| Example | Result |
+| --- | --- |
+| `qs ipc call n0ctos-config isReady` | `"true"` when ready, `"false"` otherwise |
+| `qs ipc call n0ctos-config isWriting` | `"true"` while writing, `"false"` otherwise |
+| `qs ipc call n0ctos-config isDirty` | `"true"` when change history exists, `"false"` otherwise |
+| `qs ipc call n0ctos-config getPath` | `"/home/user/.config/N0ctOS/config.json"` |
+| `qs ipc call n0ctos-config getRevision` | `"3"` (current revision number) |
+
+For example:
+
+```bash
+qs ipc call n0ctos-config isReady
+```
+
+returns:
+
+```text
+true
+```
+
+or:
+
+```text
+false
+```
+
+```bash
+qs ipc call n0ctos-config getPath
+```
+
+returns:
+
+```text
+/home/user/.config/N0ctOS/config.json
+```
+
+```bash
+qs ipc call n0ctos-config getRevision
+```
+
+returns:
+
+```text
+3
+```
+
+## File control
+
+| How to call | What does it do |
+| --- | --- |
+| `save` | True checkpoint for `homeConfig` (sync when idle, deferred while writes are in flight; see Undo history). |
+| `reload` | Reloads `homeConfig`, discarding unsaved state (baseline = disk, history wiped). Rejected while the write pipeline is active. |
+| `reloadAll` | Reloads every registered file. Skips files currently being written. |
+
+| Example | Result |
+| --- | --- |
+| `qs ipc call n0ctos-config save` | `"true"` checkpoint (sync or deferred); `"false"` when no controller exists or not ready |
+| `qs ipc call n0ctos-config reload` | `"true"` and file reloaded; `"false"` while writing or when no controller exists |
+| `qs ipc call n0ctos-config reloadAll` | `"true"` when every file reloaded; `"false"` when one or more files were skipped or failed |
+
+For example:
+
+```bash
+qs ipc call n0ctos-config save
+```
+
+```bash
+qs ipc call n0ctos-config reload
+```
+
+```bash
+qs ipc call n0ctos-config reloadAll
+```
+
+## Undo history
+
+| How to call | What does it do |
+| --- | --- |
+| `undo` | Undoes the newest `homeConfig` change (autosaves). `"false"` when nothing to undo or not ready. |
+| `redo` | Redoes the newest undone `homeConfig` change (autosaves). `"false"` when nothing to redo or not ready. |
+| `revert` | Restores the `homeConfig` baseline in a single commit and wipes history. `"false"` when already clean or not ready. |
+
+| Example | Result |
+| --- | --- |
+| `qs ipc call n0ctos-config undo` | `"true"` on success; `"false"` when there is nothing to undo or the file is not ready |
+| `qs ipc call n0ctos-config redo` | `"true"` on success; `"false"` when there is nothing to redo or the file is not ready |
+| `qs ipc call n0ctos-config revert` | `"true"` on success; `"false"` when already clean or not ready |
+
+```bash
+qs ipc call n0ctos-config undo
+```
+
+```bash
+qs ipc call n0ctos-config redo
+```
+
+```bash
+qs ipc call n0ctos-config revert
+```
+
+## Registry
+
+| How to call | What does it do |
+| --- | --- |
+| `hasPath <fileKey>` | Checks whether a file key is registered. No fallback. |
+| `getPaths` | Returns all registered paths as a JSON string. Returns `""` on serialization failure. |
+| `registerPath <fileKey> <path>` | Registers one logical file key (creates document, state, and controller). |
+| `updatePath <fileKey> <path>` | Redirects an existing non-default key to a new physical path (document reset + reload). |
+| `removePath <fileKey>` | Removes a non-default key (document, state, and controller removed). Leaves the physical file untouched. |
+
+| Example | Result |
+| --- | --- |
+| `qs ipc call n0ctos-config hasPath networkConfig` | `"true"` when registered, `"false"` otherwise |
+| `qs ipc call n0ctos-config getPaths` | `'{"homeConfig":"/home/user/.config/N0ctOS/config.json",...}'`, or `""` on failure |
+| `qs ipc call n0ctos-config registerPath networkConfig '~/.config/N0ctOS/network.json'` | `"true"` and key registered; `"false"` when rejected |
+| `qs ipc call n0ctos-config updatePath networkConfig '~/.config/N0ctOS/network-v2.json'` | `"true"` and path replaced plus new file loaded; `"false"` when rejected |
+| `qs ipc call n0ctos-config removePath networkConfig` | `"true"` and registry entry removed (file remains); `"false"` when rejected |
+
+For example:
+
+```bash
+qs ipc call \
+    n0ctos-config \
+    hasPath \
+    networkConfig
+```
+
+returns:
+
+```text
+true
+```
+
+when the key is registered.
+
+```bash
+qs ipc call \
+    n0ctos-config \
+    getPaths
+```
+
+returns:
+
+```json
+{
+    "homeConfig": "/home/user/.config/N0ctOS/config.json",
+    "networkConfig": "/home/user/.config/N0ctOS/network.json"
+}
+```
+
+```bash
+qs ipc call \
+    n0ctos-config \
+    registerPath \
+    networkConfig \
+    '~/.config/N0ctOS/network.json'
+```
+
+```bash
+qs ipc call \
+    n0ctos-config \
+    updatePath \
+    networkConfig \
+    '~/.config/N0ctOS/network-v2.json'
+```
+
+This changes the physical path associated with `networkConfig`. It does not move or copy the old file.
+
+```bash
+qs ipc call \
+    n0ctos-config \
+    removePath \
+    networkConfig
+```
+
+This removes the logical registry entry, its document/state/history, and its watcher. It does not delete the physical file.
+
+## File-specific operations (`*At` variants)
+
+Every default-file operation has a file-specific twin. Unknown keys fall back to `homeConfig` (with a one-time warning), except registry `hasPath`, which never falls back.
+
+| How to call | What does it do |
+| --- | --- |
+| `isReadyAt <fileKey>` | Returns whether the given file is ready. |
+| `isWritingAt <fileKey>` | Returns whether the given file is writing. |
+| `isDirtyAt <fileKey>` | Returns whether the given file is dirty. |
+| `getPathAt <fileKey>` | Returns the resolved path for the given key (`homeConfig` path when unknown). |
+| `getRevisionAt <fileKey>` | Returns the revision for the given key. |
+| `getAt <path> <fileKey>` | Reads a value from the given file as JSON. Returns `""` when missing. |
+| `getDocumentAt <fileKey>` | Reads the whole document for the given file as JSON. Returns `""` on failure. |
+| `historyAt <fileKey>` | Returns `{past, future, canUndo, canRedo, count, limit, isDirty}` detail for the given file as JSON. Returns `""` on failure. |
+| `hasAt <path> <fileKey>` | Checks existence in the given file. |
+| `setJsonAt <path> <json> <fileKey>` | Writes parsed JSON to the given file. |
+| `updateJsonAt <dataPath> <json-object> <fileKey>` | Merges an object value into the given file. |
+| `removeAt <path> <fileKey>` | Deletes a value from the given file. |
+| `undoAt <fileKey>` | Undoes the newest change in the given file. |
+| `redoAt <fileKey>` | Redoes the newest undone change in the given file. |
+| `revertAt <fileKey>` | Restores the baseline of the given file in a single commit. |
+| `saveAt <fileKey>` | Saves the given file (checkpoint). |
+| `reloadAt <fileKey>` | Reloads the given file, discarding unsaved state. Rejected while writing. |
+
+| Example | Result |
+| --- | --- |
+| `qs ipc call n0ctos-config isReadyAt networkConfig` | `"true"` when ready, `"false"` otherwise |
+| `qs ipc call n0ctos-config isWritingAt networkConfig` | `"true"` while writing, `"false"` otherwise |
+| `qs ipc call n0ctos-config isDirtyAt networkConfig` | `"true"` when dirty, `"false"` otherwise |
+| `qs ipc call n0ctos-config getPathAt networkConfig` | `"/home/user/.config/N0ctOS/network.json"` (`homeConfig` path when unknown) |
+| `qs ipc call n0ctos-config getRevisionAt networkConfig` | `"3"` (revision for that file) |
+| `qs ipc call n0ctos-config getAt wifi.enabled networkConfig` | `"true"` (JSON value), or `""` when missing |
+| `qs ipc call n0ctos-config getDocumentAt networkConfig` | Whole `networkConfig` document snapshot as JSON, or `""` on failure |
+| `qs ipc call n0ctos-config historyAt networkConfig` | Same history detail for `networkConfig`, or `""` on failure |
+| `qs ipc call n0ctos-config hasAt wifi.enabled networkConfig` | `"true"` when it exists, `"false"` when it does not |
+| `qs ipc call n0ctos-config setJsonAt wifi.enabled false networkConfig` | `"true"` and value written plus autosave write queued; `"false"` when rejected |
+| `qs ipc call n0ctos-config updateJsonAt wifi '{"enabled":true}' networkConfig` | `"true"` and value merged plus autosave write queued; `"false"` on invalid or non-object value |
+| `qs ipc call n0ctos-config removeAt wifi.enabled networkConfig` | `"true"` and property deleted plus autosave write queued; `"false"` when missing |
+| `qs ipc call n0ctos-config undoAt networkConfig` | `"true"` on success; `"false"` when nothing to undo or not ready |
+| `qs ipc call n0ctos-config redoAt networkConfig` | `"true"` on success; `"false"` when nothing to redo or not ready |
+| `qs ipc call n0ctos-config revertAt networkConfig` | `"true"` on success; `"false"` when already clean or not ready |
+| `qs ipc call n0ctos-config saveAt networkConfig` | `"true"` checkpoint (sync or deferred); `"false"` when no controller exists or not ready |
+| `qs ipc call n0ctos-config reloadAt networkConfig` | `"true"` and file reloaded; `"false"` while writing or when no controller exists |
+
+For example, read from another file:
+
+```bash
+qs ipc call \
+    n0ctos-config \
+    getAt \
+    wifi.enabled \
+    networkConfig
+```
+
+Write to another file:
+
+```bash
+qs ipc call \
+    n0ctos-config \
+    setJsonAt \
+    wifi.enabled \
+    false \
+    networkConfig
+```
+
+Update another file:
+
+```bash
+qs ipc call \
+    n0ctos-config \
+    updateJsonAt \
+    wifi \
+    '{"enabled":true}' \
+    networkConfig
+```
+
+Remove from another file:
+
+```bash
+qs ipc call \
+    n0ctos-config \
+    removeAt \
+    wifi.enabled \
+    networkConfig
+```
+
+Undo, save, and reload:
+
+```bash
+qs ipc call \
+    n0ctos-config \
+    undoAt \
+    networkConfig
+```
+
+```bash
+qs ipc call \
+    n0ctos-config \
+    saveAt \
+    networkConfig
+```
+
+```bash
+qs ipc call \
+    n0ctos-config \
+    reloadAt \
+    networkConfig
+```
+
+In total the `n0ctos-config` target exposes ~40 operations: 5 default-file state reads, 5 `*At` state reads, 5 registry ops, 8 reads, 6 writes, 6 undo ops, and 5 file-control ops.
+
+---
+
+# 4. Features / limitations
+
+## Features
+
+### Centralized configuration ownership
+
+Configuration file handling is centralized in:
+
+```text
+ConfigStore.qml
+```
+
+Services and UI consume:
+
+```text
+Config.qml (facade)
+```
+
+or `ConfigStore.qml` directly when they need store-level detail, rather than implementing their own persistence mechanisms.
+
+### One controller per registered file
+
+An `Instantiator` creates exactly one invisible controller `Item` per entry in `_pathKeys`:
+
+```text
+_pathKeys = ["homeConfig", "networkConfig", ...]
+    │
+    ▼
+Instantiator → controller per fileKey
+    │
+    ├── FileView (load / watch / atomic save)
+    ├── reloadDebounce (80 ms Timer)
+    ├── createDirectory (mkdir -p Process)
+    └── write helpers (_serializeDocument / _startWrite / _flushQueuedWrite / queueSave / forceReload)
+```
+
+`onObjectAdded` registers the controller in `_controllers` and bumps `_registryRevision` (which re-triggers reactive bindings that captured it). `onObjectRemoved` unregisters it. `pathKeys` is therefore the single driver of controller lifetimes: `registerPath()` grows it, `removePath()` shrinks it.
+
+### Controller fields (direct-use reference)
+
+Each controller exposes:
+
+| Field | Meaning |
+| --- | --- |
+| `fileKey` | Logical key (`String(modelData)`). |
+| `filePath` | `_paths[fileKey]` or `defaultHomeConfigPath`. |
+| `isDirectoryReady` | Whether the parent directory has been created/confirmed. |
+| `writeText` | Serialized document currently owned by `FileView` (the in-flight write). |
+| `queuedWriteText` | Newest state waiting behind the in-flight write. |
+| `completeSaveWhenIdle` | Set by `save()` while writes are in flight; cleared by a later mutation. Consumed in `onSaved` to establish the checkpoint. |
+| `writeFailed` | Set on any failed disk write or directory creation; cleared on success. Lets `save()` force a rewrite instead of a sync checkpoint. |
+| `explicitReloadPending` | Consumed by the next load result; distinguishes explicit `reload()` from watcher reloads. |
+
+Direct mutation of these fields is not part of the public contract — they are documented here so store-level debugging and tests can interpret controller state.
+
+### Reactive documents
+
+Configuration changes propagate through QML property bindings:
+
+```qml
+property bool isDnd:
+    ConfigStore.get(
+        "notifications.isDnd",
+        false
+    )
+```
+
+When the document is replaced, the binding reevaluates. `documentFor()` returns a JSON clone so callers cannot bypass history, revision, and the write queue by mutating the live document.
+
+### Multiple configuration files
+
+The store supports registered file keys such as:
+
+```text
+homeConfig
+networkConfig
+wallpaperConfig
+themeConfig
+```
+
+Each file behaves as an independent reactive document while sharing one engine:
+
+```text
+ConfigStore
+    │
+    ├── homeConfig document + state + controller
+    ├── networkConfig document + state + controller
+    └── wallpaperConfig document + state + controller
+```
+
+### Per-file state
+
+Every configuration file has its own:
+
+```text
+document
+ready
+writing
+writePending
+revision
+dirty (derived: document != baseline)
+```
+
+observed through:
+
+```qml
+ConfigStore.isReadyFor(
+    "networkConfig"
+)
+```
+
+or the default-file shortcuts:
+
+```qml
+ConfigStore.isReady
+ConfigStore.isWriting
+ConfigStore.isDirty
+ConfigStore.revision
+```
+
+`_fileStates[fileKey]` holds `{ready, writing, writePending, revision}`. `_isWritePending()` (writing/writePending/queued text) guards reloads and registry moves; `_isWriteDirty()` additionally covers baseline-dirty state and guards `updatePath()`/`removePath()`.
+
+### Event-driven file watching
+
+Files use:
+
+```qml
+watchChanges: true
+```
+
+instead of a periodic polling loop. Watcher events from local writes are ignored (the write pipeline owns those); external events restart the 80 ms `reloadDebounce`, which suppresses itself again if a write started meanwhile and otherwise calls `configFile.reload()`.
+
+The intended behavior is:
+
+```text
+file changes
+     │
+     ▼
+watcher event
+     │
+     ▼
+short debounce (80 ms)
+     │
+     ▼
+reload
+     │
+     ▼
+parse JSON
+     │
+     ▼
+update document
+```
+
+The debounce exists only to coalesce rapid filesystem event bursts. It is not a polling mechanism.
+
+### First load vs. watcher reload vs. explicit reload
+
+`_handleLoaded()` distinguishes three cases:
+
+```text
+first successful load (not ready)
+    → document = parsed, baseline = parsed, history cleared
+
+explicit reload (explicitReloadPending)
+    → document = parsed, baseline = parsed, history cleared
+    (local dirty state intentionally discarded)
+
+watcher reload
+    → identical to memory → no-op
+    → different → history entry (op "externalReload") + document replaced
+      (baseline stays, so the file reads as dirty and undo() can restore)
+```
+
+Invalid JSON on first load (or when not ready) initializes an empty document/baseline/history; invalid JSON on later loads warns and preserves the last valid in-memory document.
+
+### Debounced reloads
+
+Filesystem operations may produce several rapid events:
+
+```text
+temporary file created
+temporary file renamed
+target replaced
+metadata changed
+```
+
+A single short single-shot timer coalesces them:
+
+```text
+fileChanged
+    │
+    ▼
+restart debounce timer
+    │
+    ▼
+more events?
+   /      \
+ yes       no
+  │          │
+  ▼          ▼
+restart    reload
+```
+
+The timer only runs after a filesystem event.
+
+### Atomic writes
+
+Configuration files use:
+
+```qml
+atomicWrites: true
+```
+
+### Write queue
+
+Multiple changes occurring while a write is already in progress are collapsed into the latest serialized state:
+
+```text
+current write
+     │
+     ▼
+onSaved
+     │
+     ▼
+queued latest state?
+   /        \
+ yes         no
+  │            │
+  ▼            ▼
+write it    complete (checkpoint when save() pending)
+```
+
+Only the latest queued document needs to be written. `_startWrite()` routes through the directory gate (`mkdir -p` via `Process` when `isDirectoryReady` is false), the pipeline gate (queue when already writing), and finally `configFile.setText()`.
+
+For example:
+
+```text
+set A
+   │
+   ├── write starts
+   │
+set B
+   │
+   ├── write already active
+   │
+   └── latest state queued
+```
+
+The service does not start several writes simultaneously.
+
+`onSaved` clears `writeText`/`writeFailed`/pipeline flags, flushes any queued write first, and only then honors a pending `save()` checkpoint (baseline = current document + history cleared).
+
+`onSaveFailed` clears pending texts, cancels the checkpoint, sets `writeFailed`, emits `saveError(fileKey, reason)`, and leaves recovery to a later `save()` (which forces a rewrite when `writeFailed` is set).
+
+### Automatic directory creation
+
+Parent directories are created automatically before the first write:
+
+```text
+first write
+    │
+    ▼
+mkdir -p parent
+    │
+    ▼
+FileView.setText()
+```
+
+Directory-creation failure clears the pipeline, sets `writeFailed`, marks ready, and emits `saveError(fileKey, "failed to create parent directory")`.
+
+### JSON validation
+
+The service validates loaded configuration and rejects invalid JSON. Empty files are interpreted as:
+
+```json
+{}
+```
+
+Root arrays and primitive root values are rejected (`"config root must be a JSON object"`).
+
+### Corruption protection
+
+Malformed configuration files are not automatically replaced with `{}` when a valid document is already available. When JSON parsing fails on a later load:
+
+```text
+file
+ │
+ ▼
+JSON.parse()
+ │
+ ✗
+ │
+ ▼
+warning log (valid in-memory document preserved)
+```
+
+Only the never-ready case initializes empty state so the shell can boot.
+
+### Path abstraction
+
+Services use logical keys rather than repeating physical filesystem paths:
+
+```text
+networkConfig
+```
+
+instead of:
+
+```text
+/home/user/.config/N0ctOS/network.json
+```
+
+### Path expansion
+
+The service understands:
+
+```text
+~
+$HOME
+${HOME}
+$XDG_CONFIG_HOME
+${XDG_CONFIG_HOME}
+```
+
+Relative paths resolve relative to the home directory.
+
+### Path registry CRUD
+
+The registry supports:
+
+```text
+Create
+Read
+Update
+Delete
+```
+
+for non-default configuration paths:
+
+```text
+CREATE
+    ConfigStore.registerPath()
+    ConfigStore.registerPaths()
+
+READ
+    ConfigStore.hasPath()
+    ConfigStore.pathFor()
+    ConfigStore.paths
+    ConfigStore.pathKeys
+
+UPDATE
+    ConfigStore.updatePath()
+
+DELETE
+    ConfigStore.removePath()
+```
+
+`registerPath()` also seeds the document (`{}`), file state, baseline, and history so the new controller boots cleanly. `updatePath()` resets document/state/history/baseline and force-reloads the new file through the existing controller. `removePath()` deletes document/state/history/baseline entries and shrinks `pathKeys`, which destroys the controller.
+
+### Registry safety
+
+The service prevents:
+
+```text
+duplicate physical paths
+removing homeConfig
+updating homeConfig
+updating an unregistered key
+removing an unregistered key
+changing a dirty/writing path
+```
+
+### Deep object updates
+
+`update()` performs a recursive object merge (same semantics documented in `config.mdx` §4). Existing nested properties not present in the value remain unchanged.
+
+### Revision tracking
+
+Each document has a revision number:
+
+```text
+revision 1
+    │
+external reload
+    ▼
+revision 2
+    │
+set()
+    ▼
+revision 3
+```
+
+The revision is useful as a reactive change marker. Services bind `Config.revision`-style expressions (or `ConfigStore.revision` / `revisionFor()`) so reads reevaluate on every document replacement.
+
+### Unknown-key fallback with one-time warnings
+
+Normal configuration operations resolve through `_resolveFileKey()`: empty/missing keys and unregistered keys map to `homeConfig`, and each unknown key warns exactly once (`_warnedUnknownKeys`). Registry CRUD uses `_normalizeFileKey()` instead and never falls back.
+
+### Debug logging
+
+The service provides explicit debug logging for:
+
+```text
+path registration
+file loading
+file watching
+document updates
+writes
+save failures
+IPC operations
+```
+
+`ConfigStore` owns:
+
+```qml
+ConfigStore.isDebugLogging
+```
+
+The default value is:
+
+```text
+true
+```
+
+When enabled, lifecycle operations emit messages such as:
+
+```text
+[N0ctOS Config] LOAD File loaded: homeConfig -> /home/user/.config/N0ctOS/config.json
+
+[N0ctOS Config] WRITE set(): homeConfig -> audio.volume revision: 4
+
+[N0ctOS Config] WRITE Writing config: homeConfig -> /home/user/.config/N0ctOS/config.json
+
+[N0ctOS Config] WRITE Write completed: homeConfig -> /home/user/.config/N0ctOS/config.json
+
+[N0ctOS Config] PATH Path registered: networkConfig -> /home/user/.config/N0ctOS/network.json
+```
+
+Debug logging does not intentionally print configuration values. Warnings and errors remain enabled even when debug logging is disabled.
+
+To disable normal debug output:
+
+```qml
+ConfigStore.isDebugLogging = false
+```
+
+`Config.isDebugLogging` is a read-only mirror and cannot be assigned directly.
+
+### IPC control
+
+Configuration, history, and path registry operations can be controlled from the terminal through:
+
+```text
+n0ctos-config
+```
+
+---
+
+## Limitations
+
+### JSON only
+
+The configuration format is JSON. The service does not provide YAML, TOML, INI, or arbitrary binary configuration support.
+
+### Root must be an object
+
+Configuration documents are expected to have:
+
+```json
+{}
+```
+
+as their root structure. Root arrays and primitive root values are not accepted:
+
+```json
+[]
+```
+
+```json
+"hello"
+```
+
+```json
+42
+```
+
+When the root is invalid on first load, the service initializes empty state; on later loads it preserves the valid document and does not intentionally overwrite the file.
+
+### File keys must be registered
+
+A secondary configuration file must be registered before it can be intentionally addressed. Unknown keys fall back to:
+
+```text
+homeConfig
+```
+
+for normal configuration operations (with a one-time warning).
+
+### Registry CRUD does not fallback
+
+Registry operations require exact keys:
+
+```qml
+ConfigStore.removePath(
+    "notRegistered"
+)
+```
+
+does not remove or modify `homeConfig`. It returns `false`.
+
+### A file key identifies one physical file
+
+A registered key cannot be silently redirected. Path changes must use:
+
+```qml
+ConfigStore.updatePath()
+```
+
+### Duplicate physical paths are rejected
+
+The same physical file cannot be registered under multiple logical keys. That would create two watchers/controllers for one file.
+
+### `homeConfig` is permanent
+
+The default file key cannot be removed or redirected through the registry API:
+
+```qml
+ConfigStore.updatePath(
+    "homeConfig",
+    "/somewhere/config.json"
+)
+```
+
+is rejected, and:
+
+```qml
+ConfigStore.removePath(
+    "homeConfig"
+)
+```
+
+is rejected.
+
+### Dirty/writing files cannot change registry ownership
+
+A file key cannot be updated or removed while its write pipeline is active or its dirty-write state is set:
+
+```text
+writing / writePending / queued write text / dirty-write
+```
+
+Baseline-dirty alone is part of this guard for registry moves (unlike the `config.mdx` facade wording, the store checks `_isWriteDirty()` too). This prevents in-flight writes from being detached from their file.
+
+### No arbitrary path writes through normal API
+
+The normal configuration API works through logical file keys. There is no:
+
+```qml
+ConfigStore.setAtAbsolutePath(...)
+```
+
+### Invalid external JSON is not silently repaired
+
+When a file contains malformed JSON after boot, the service logs the error and preserves the last known valid in-memory document.
+
+### Registry removal does not delete files
+
+Removing a key from the registry does not delete its physical JSON file:
+
+```qml
+ConfigStore.removePath(
+    "networkConfig"
+)
+```
+
+does **not** execute:
+
+```text
+rm ~/.config/N0ctOS/network.json
+```
+
+The operation only removes N0ctOS's ownership of that logical path (plus document, state, history, baseline, and controller).
+
+### `undefined` is not storable
+
+JSON has no `undefined` value. Therefore:
+
+```qml
+ConfigStore.set(
+    "some.value",
+    undefined
+)
+```
+
+returns `false`. `null` is valid because it is a valid JSON value.
+
+### Explicit reload discards local state
+
+An explicit:
+
+```qml
+ConfigStore.reload()
+```
+
+intentionally discards unsaved local changes for that file (baseline = disk content, history wiped).
+
+### Facade-only helpers live in `Config`
+
+Warn-once bookkeeping text, `Config`-level debug context around writes/paths/saves/reloads, and the no-arg `externalReload()` broadcast exist on the facade. Store consumers that bypass `Config` get the same persistence behavior without those conveniences.
+
+---
+
+# 5. Example use cases
+
+## 5.1 Basic service configuration (direct store)
+
+A service only needs a reactive read:
+
+```qml
+import QtQuick
+
+import qs.services
+
+Item {
+    readonly property bool isDnd:
+        ConfigStore.get(
+            "notifications.isDnd",
+            false
+        )
+
+    readonly property int volume:
+        ConfigStore.get(
+            "audio.volume",
+            100
+        )
+}
+```
+
+When the configuration changes:
+
+```json
+{
+    "audio": {
+        "volume": 80
+    }
+}
+```
+
+the binding reevaluates. The component does not need to know whether the value came from:
+
+```text
+a local write
+an external editor
+an IPC call
+the initial file load
+```
+
+It only receives the effective value.
+
+---
+
+## 5.2 Writing configuration directly
+
+Toggle a setting without touching files:
+
+```qml
+import QtQuick
+
+import qs.services
+
+MouseArea {
+    anchors.fill: parent
+
+    onClicked: {
+        ConfigStore.set(
+            "notifications.isDnd",
+            !ConfigStore.get(
+                "notifications.isDnd",
+                false
+            )
+        )
+    }
+}
+```
+
+The service:
+
+```text
+changes document (revision++, documentUpdated)
+      ↓
+marks dirty (document != baseline)
+      ↓
+queues autosave write
+      ↓
+writes JSON (baseline untouched)
+```
+
+`save()` later establishes the checkpoint (baseline = document, history wiped). The UI does not perform file operations itself.
+
+---
+
+## 5.3 Registering a service-specific file
+
+A service defines its path table locally:
+
+```qml
+import QtQuick
+
+import qs.services
+
+Item {
+    readonly property var configPaths: ({
+        networkConfig:
+            "~/.config/N0ctOS/network.json"
+    })
+
+    Component.onCompleted: {
+        ConfigStore.registerPaths(
+            configPaths
+        )
+    }
+}
+```
+
+Then:
+
+```qml
+readonly property bool wifiEnabled:
+    ConfigStore.get(
+        "wifi.enabled",
+        true,
+        "networkConfig"
+    )
+```
+
+If the key is already registered with the same path, registration is idempotent and returns `true`.
+
+---
+
+## 5.4 Updating several values
+
+Use `update()` when multiple properties inside the same section should change together:
+
+```qml
+ConfigStore.update(
+    "wallpaper",
+    {
+        mode: "random",
+        interval: 600,
+        transition: "fade"
+    }
+)
+```
+
+This deep-merges instead of replacing the whole section. A non-object value returns `false`.
+
+---
+
+## 5.5 Removing an optional setting
+
+```qml
+ConfigStore.remove(
+    "wallpaper.transition"
+)
+```
+
+Afterwards:
+
+```qml
+ConfigStore.has(
+    "wallpaper.transition"
+)
+```
+
+returns:
+
+```text
+false
+```
+
+`remove()` itself returns `true` on success and `false` when the path did not exist.
+
+---
+
+## 5.6 Watching a configuration value reactively
+
+```qml
+import QtQuick
+
+import qs.services
+
+Item {
+    property bool isDnd:
+        ConfigStore.get(
+            "notifications.isDnd",
+            false
+        )
+
+    Text {
+        text:
+            parent.isDnd
+                ? "DND"
+                : "Notifications"
+    }
+}
+```
+
+When another process modifies the file:
+
+```text
+JSON file
+    ↓
+FileView watcher
+    ↓
+debounce
+    ↓
+reload
+    ↓
+document replacement (+ externalReload history entry)
+    ↓
+ConfigStore.get() changes
+    ↓
+isDnd changes
+    ↓
+Text updates
+```
+
+No polling timer is required.
+
+---
+
+## 5.7 Displaying store state
+
+```qml
+import QtQuick
+
+import qs.services
+
+Column {
+    Text {
+        text:
+            "Ready: " +
+            ConfigStore.isReady
+    }
+
+    Text {
+        text:
+            "Writing: " +
+            ConfigStore.isWriting
+    }
+
+    Text {
+        text:
+            "Dirty: " +
+            ConfigStore.isDirty
+    }
+
+    Text {
+        text:
+            "Revision: " +
+            ConfigStore.revision
+    }
+
+    Text {
+        text:
+            ConfigStore.configPath
+    }
+}
+```
+
+For another file, use:
+
+```qml
+ConfigStore.isReadyFor(
+    "networkConfig"
+)
+```
+
+---
+
+## 5.8 Undo, redo, and revert
+
+```qml
+ConfigStore.undo()
+ConfigStore.redo()
+ConfigStore.revert()
+```
+
+Per file:
+
+```qml
+ConfigStore.undo(
+    "networkConfig"
+)
+```
+
+Inspect the stacks:
+
+```qml
+const h = ConfigStore.historyAt("networkConfig")
+const canUndo = h.canUndo
+const canRedo = h.canRedo
+```
+
+Each mutation autosaves, so undo/redo/revert are durable immediately — `save()` only moves the checkpoint.
+
+---
+
+## 5.9 Manual reload and checkpoint buttons
+
+```qml
+import QtQuick
+
+import qs.services
+
+Row {
+    Rectangle {
+        width: 120
+        height: 36
+
+        Text {
+            anchors.centerIn: parent
+            text: "Reload"
+        }
+
+        MouseArea {
+            anchors.fill: parent
+
+            onClicked:
+                ConfigStore.reload()
+        }
+    }
+
+    Rectangle {
+        width: 120
+        height: 36
+
+        Text {
+            anchors.centerIn: parent
+            text: "Save"
+        }
+
+        MouseArea {
+            anchors.fill: parent
+
+            onClicked:
+                ConfigStore.save()
+        }
+    }
+}
+```
+
+Explicit reload discards unsaved local state for that file (baseline = disk, history wiped). While the write pipeline is active it returns `false`. `save()` establishes the clean baseline and wipes history.
+
+---
+
+## 5.10 Path registry workflow
+
+A service can create a dedicated file:
+
+```qml
+ConfigStore.registerPath(
+    "networkConfig",
+    "~/.config/N0ctOS/network.json"
+)
+```
+
+Check it:
+
+```qml
+ConfigStore.hasPath(
+    "networkConfig"
+)
+```
+
+Inspect it:
+
+```qml
+ConfigStore.pathFor(
+    "networkConfig"
+)
+```
+
+Redirect it:
+
+```qml
+ConfigStore.updatePath(
+    "networkConfig",
+    "~/.config/N0ctOS/network-v2.json"
+)
+```
+
+Remove the logical registration:
+
+```qml
+ConfigStore.removePath(
+    "networkConfig"
+)
+```
+
+The physical JSON file remains untouched by `removePath()`.
+
+---
+
+## 5.11 Listening to store signals
+
+Unlike the facade, store signals always name the file:
+
+```qml
+Connections {
+    target: ConfigStore
+
+    function onDocumentUpdated(fileKey) {
+        console.log("Document:", fileKey)
+    }
+
+    function onExternalReload(fileKey) {
+        console.log("External reload:", fileKey)
+    }
+
+    function onSaveError(fileKey, reason) {
+        console.warn("Save failed:", fileKey, reason)
+    }
+}
+```
+
+Use `onDocumentUpdated` for reactive side effects that need the file key, and `onSaveError` for surfacing write failures per file.
+
+---
+
+## 5.12 Debugging the store
+
+Enable:
+
+```qml
+ConfigStore.isDebugLogging = true
+```
+
+Then perform:
+
+```qml
+ConfigStore.set(
+    "audio.volume",
+    75
+)
+```
+
+The log flow is approximately:
+
+```text
+[N0ctOS Config] WRITE set(): homeConfig -> audio.volume revision: 4
+
+[N0ctOS Config] WRITE Writing config:
+homeConfig
+->
+/home/user/.config/N0ctOS/config.json
+
+[N0ctOS Config] WRITE Write completed:
+homeConfig
+->
+/home/user/.config/N0ctOS/config.json
+```
+
+For an external change:
+
+```text
+[N0ctOS Config] WATCH Filesystem change detected:
+homeConfig
+->
+/home/user/.config/N0ctOS/config.json
+
+[N0ctOS Config] WATCH Reloading changed file:
+homeConfig
+->
+/home/user/.config/N0ctOS/config.json
+
+[N0ctOS Config] LOAD File loaded:
+homeConfig
+->
+/home/user/.config/N0ctOS/config.json
+```
+
+This makes watcher and write problems much easier to diagnose. Remember: `Config.isDebugLogging` is read-only — only `ConfigStore.isDebugLogging` can be assigned.
+
+---
+
+## 5.13 Terminal workflow
+
+Read a value:
+
+```bash
+qs ipc call n0ctos-config get \
+    notifications.isDnd
+```
+
+Read the whole document and history:
+
+```bash
+qs ipc call n0ctos-config getDocument
+```
+
+```bash
+qs ipc call n0ctos-config history
+```
+
+Check existence:
+
+```bash
+qs ipc call n0ctos-config has \
+    notifications.isDnd
+```
+
+Write JSON:
+
+```bash
+qs ipc call n0ctos-config setJson \
+    audio.volume \
+    80
+```
+
+Update a section:
+
+```bash
+qs ipc call n0ctos-config updateJson \
+    notifications \
+    '{"isDnd":true,"timeout":5}'
+```
+
+Remove a value:
+
+```bash
+qs ipc call n0ctos-config remove \
+    notifications.isDnd
+```
+
+Undo history:
+
+```bash
+qs ipc call n0ctos-config undo
+qs ipc call n0ctos-config redo
+qs ipc call n0ctos-config revert
+```
+
+Inspect service state:
+
+```bash
+qs ipc call n0ctos-config isReady
+```
+
+```bash
+qs ipc call n0ctos-config getPath
+```
+
+```bash
+qs ipc call n0ctos-config getRevision
+```
+
+Manage the registry:
+
+```bash
+qs ipc call n0ctos-config registerPath \
+    networkConfig \
+    '~/.config/N0ctOS/network.json'
+```
+
+```bash
+qs ipc call n0ctos-config getPaths
+```
+
+Work with another file:
+
+```bash
+qs ipc call n0ctos-config getAt \
+    wifi.enabled \
+    networkConfig
+```
+
+```bash
+qs ipc call n0ctos-config setJsonAt \
+    wifi.enabled \
+    false \
+    networkConfig
+```
+
+```bash
+qs ipc call n0ctos-config saveAt \
+    networkConfig
+```
+
+```bash
+qs ipc call n0ctos-config undoAt \
+    networkConfig
+```
+
+```bash
+qs ipc call n0ctos-config reloadAt \
+    networkConfig
+```
+
+---
+
+# 6. Detailed architecture
+
+This section is for developers working on `ConfigStore.qml`, `Config.qml`, and the services/components that consume them.
+
+---
+
+## 6.1 Overall architecture
+
+The architecture is:
+
+```text
+N0ctOS UI / Services
+        │
+        ▼
+    Config.qml (facade)
+        │
+        ▼
+ ConfigStore.qml (this file)
+        │
+        ├── Path registry
+        │
+        ├── File controllers (Instantiator, one per fileKey)
+        │
+        ├── Reactive documents + per-file states
+        │
+        ├── History + baselines
+        │
+        ├── FileView watchers + debounce + write queue
+        │
+        └── IPC (n0ctos-config)
+        │
+        ▼
+Configuration files
+```
+
+There are two layers:
+
+```text
+Config.qml
+    public / convenient API (forwards + debug context + signal fan-out)
+
+ConfigStore.qml
+    actual implementation (owns everything below the facade)
+```
+
+Everyday UI normally interacts only with `Config`. Store-level consumers interact with `ConfigStore` directly for controller insight, `documentUpdated` semantics, debug control, and IPC behavior.
+
+---
+
+## 6.2 The file registry
+
+The store maintains a logical path table:
+
+```qml
+{
+    homeConfig:
+        "/home/user/.config/N0ctOS/config.json",
+
+    networkConfig:
+        "/home/user/.config/N0ctOS/network.json"
+}
+```
+
+The keys are logical identifiers. The values are resolved physical paths. Consumers therefore operate on:
+
+```text
+networkConfig
+```
+
+instead of:
+
+```text
+/home/user/.config/N0ctOS/network.json
+```
+
+`_paths` is the table, `_pathKeys` is its key list (the `Instantiator` model), and `_registryRevision` is bumped on every registry/controller change so reactive reads (`pathFor()`, `documentFor()`, state getters) reevaluate.
+
+---
+
+## 6.3 `homeConfig`
+
+`homeConfig` is the default configuration key:
+
+```text
+defaultFileKey = "homeConfig"
+```
+
+Its path is based on:
+
+```text
+$XDG_CONFIG_HOME
+```
+
+when available. Otherwise:
+
+```text
+$HOME/.config
+```
+
+is used. The resulting default path is:
+
+```text
+$XDG_CONFIG_HOME/N0ctOS/config.json
+```
+
+or:
+
+```text
+$HOME/.config/N0ctOS/config.json
+```
+
+`homeConfig` is always present and cannot be removed or redirected. Unknown file keys resolve to it (with a one-time warning per key).
+
+---
+
+## 6.4 Key resolution: fallback vs. exact
+
+Two different normalizers serve two different API families:
+
+```text
+_resolveFileKey(fileKey) → normal config ops
+    ├── undefined/null/blank → homeConfig
+    ├── registered → the key
+    └── unknown → warn once + homeConfig
+
+_normalizeFileKey(fileKey) → registry CRUD
+    ├── trim only, no fallback
+    └── hasPath/updatePath/removePath/registerPath use exact matching
+```
+
+This is why `get()` with a bad key reads `homeConfig` while `hasPath()` with a bad key returns `false`.
+
+---
+
+## 6.5 Documents, states, baselines, history
+
+Per file key the store keeps four parallel maps:
+
+```text
+_documents[fileKey]  → live JSON object
+_fileStates[fileKey]  → {ready, writing, writePending, revision}
+_baselines[fileKey]   → clean snapshot (save()/load target)
+_history[fileKey]     → {past: [], future: []} forward deltas
+```
+
+Document replacement (`_setDocument()`) clones the new value, bumps the revision, refreshes the reactive maps, and emits `documentUpdated(fileKey)`. `isDirtyFor()` compares the live document against the baseline with `_equivalent()` — it is derived, not stored.
+
+History entries are compact forward deltas:
+
+```text
+{op, dataPath, changeCount, changes: [{path, beforeExists, beforeValue, afterExists, afterValue}]}
+```
+
+`past` holds applied changes (newest last), `future` holds undone changes (`future[0]` is the next redo). The `historyLimit` (100) applies to `past + future` together; overflow discards the oldest `past` first.
+
+External watcher changes become `op: "externalReload"` entries with the baseline left in place — which is why an external edit reads as dirty and is undoable.
+
+---
+
+## 6.6 Read path
+
+```text
+get(dataPath, fallback, fileKey)
+    ├── resolve key (unknown → homeConfig)
+    ├── empty dataPath → fallback
+    ├── walk document parts
+    │     └── missing/non-object/missing key → fallback
+    └── found → value
+
+has(dataPath, fileKey)
+    └── get(path, sentinel) !== sentinel
+
+documentFor(fileKey)
+    └── _clone(documents[resolved]) || {}
+
+historyAt(fileKey) / historyFor(fileKey)
+    └── {past, future, canUndo, canRedo, count, limit: 100, isDirty}
+```
+
+Reads never touch the filesystem. They observe the in-memory document, which the controllers keep synchronized.
+
+---
+
+## 6.7 Write path
+
+```text
+set(dataPath, value, fileKey)
+    ├── resolve key
+    ├── empty path or undefined value → false
+    ├── compute patched document (create intermediates)
+    ├── equivalent to current → true (no write, no revision, no history)
+    ├── push forward-delta history entry (clear future)
+    ├── _setDocument (revision++, documentUpdated)
+    └── controller.queueSave() → serialize (2-space + "\n") → _startWrite
+
+update(dataPath, objectValue, fileKey)
+    ├── non-empty path + object value required
+    └── deep-merge then same commit path as set()
+
+remove(dataPath, fileKey)
+    ├── missing path → false
+    └── delete + same commit path
+```
+
+Every committed mutation autosaves. `documentUpdated(fileKey)` fires once per commit. `revert()` coalesces its full-baseline restore into a single commit (single write, single revision, single signal).
+
+---
+
+## 6.8 Undo / redo / revert internals
+
+```text
+undo(fileKey)
+    ├── ready + past non-empty required
+    ├── move newest past → future
+    ├── restore before-values + autosave
+    └── cancel completeSaveWhenIdle (a mutation voids the pending checkpoint)
+
+redo(fileKey)
+    ├── ready + future non-empty required
+    └── move newest future → past + restore after-values + autosave
+
+revert(fileKey)
+    ├── ready required
+    ├── past empty + already clean → false
+    ├── replay all past before-values in reverse (one commit)
+    ├── wipe past + future
+    └── undone-to-clean with redo available → wipe without disk IO
+```
+
+No-op undo/redo (entry resolves to the current document) still advances the stacks but skips write/revision.
+
+---
+
+## 6.9 Save / reload internals
+
+```text
+save(fileKey)
+    ├── no controller or not ready → false
+    ├── clean + empty history → true (no IO)
+    ├── clean + leftover history → wipe, true (no IO, no revision)
+    ├── dirty + pipeline active → completeSaveWhenIdle = true + ensure queued, true
+    │     └── baseline/history reset later in onSaved
+    ├── dirty + idle + writeFailed → forced rewrite, checkpoint on onSaved, true
+    └── dirty + idle + disk matches → baseline = current + wipe, true (no IO)
+
+reload(fileKey) → controller.forceReload()
+    ├── stop debounce
+    ├── pipeline active → warn + false
+    ├── explicitReloadPending = true
+    └── configFile.reload() → true
+
+reloadAll()
+    └── every controller forceReload(); skipped/failed → false
+```
+
+`save()` is a checkpoint, not a write: normal mutations already persist. `reload()` is destructive by design (local state discarded, baseline = disk).
+
+---
+
+## 6.10 Controller lifecycle
+
+```text
+registerPath(key, path)
+    → validate → _paths/_pathKeys grow
+    → seed document/state/baseline/history
+    → _registryRevision++
+    → Instantiator creates controller → onObjectAdded registers it
+
+updatePath(key, newPath)
+    → validate (not homeConfig, registered, idle, unique)
+    → replace mapping, reset document/state/history/baseline
+    → controller flags reset → controller.forceReload()
+
+removePath(key)
+    → validate (not homeConfig, registered, idle)
+    → delete mapping/document/state/history/baseline
+    → _pathKeys shrinks → Instantiator destroys controller → onObjectRemoved
+```
+
+`pathKeys` is the single source of truth for controller existence. There is exactly one `FileView`, one debounce timer, and one directory `Process` per registered key — never duplicates.
+
+---
+
+## 6.11 Watcher and write plumbing
+
+Each controller wires:
+
+```text
+FileView (watchChanges, atomicWrites)
+    ├── onLoaded → _handleLoaded (first/explicit/watcher cases)
+    ├── onFileChanged → ignore when pipeline active, else debounce restart
+    ├── onLoadFailed → empty-state init when never ready, else warn
+    ├── onSaved → clear pipeline, flush queue, honor pending checkpoint
+    └── onSaveFailed → clear pipeline, writeFailed = true, saveError(fileKey, reason)
+
+reloadDebounce (80 ms)
+    └── suppress while pipeline active, else configFile.reload()
+
+createDirectory (mkdir -p)
+    └── failure → pipeline cleared, writeFailed, saveError
+```
+
+`queueSave()` serializes with `JSON.stringify(document, null, 2) + "\n"` and `_startWrite()` applies the directory gate, the already-writing gate (queue newest), and finally `configFile.setText()`.
+
+---
+
+## 6.12 IPC architecture
+
+`ConfigStore` owns `n0ctos-config`. Conceptually:
+
+```text
+terminal
+   │
+   ▼
+n0ctos-config (IpcHandler on ConfigStore)
+   │
+   ├── state/paths → isReadyFor/pathFor/revisionFor/...
+   ├── registry → registerPath/updatePath/removePath/hasPath/getPaths
+   ├── reads → _ipcGet/_ipcGetDocument/_ipcHistory/has
+   ├── writes → _ipcSetJson/_ipcUpdateJson/remove
+   ├── history → undo/redo/revert (+ At)
+   └── control → save/reload(+At)/reloadAll
+   │
+   ▼
+ConfigStore.qml
+   │
+   ▼
+JSON files
+```
+
+Reads return JSON strings (`""` when missing/unserializable). `setJson`/`updateJson` variants `JSON.parse()` their `<json>` argument (`updateJson` additionally requires an object) and return `false` with a warning on invalid input. History IPC serializes the same `historyAt()` detail the QML API returns. `reloadAll` has no `*At` twin — it already covers every file.
+
+---
+
+## 6.13 Design principles
+
+### One owner
+
+`ConfigStore` owns configuration files. UI components do not create their own `FileView` instances for normal configuration.
+
+### Config is the public API
+
+Everyday consumers use:
+
+```text
+Config
+```
+
+rather than depending directly on store internals. Direct `ConfigStore` use is reserved for backing-store access, controller fields, debug control, and IPC behavior.
+
+### Documents are reactive
+
+Configuration changes replace document state so QML bindings can react naturally. Cloned snapshots prevent bypassing history and the write queue.
+
+### I/O and state are separated
+
+Controllers handle:
+
+```text
+FileView
+directory creation
+watching
+write queue
+```
+
+while the root store owns:
+
+```text
+documents
+file states
+baselines
+history
+registry
+```
+
+### One controller per registered file
+
+Each registered file gets one watcher/controller, driven by `pathKeys`.
+
+### No polling
+
+Configuration changes are detected through filesystem events.
+
+### Watchers are debounced
+
+Rapid filesystem event bursts are coalesced (80 ms) before parsing.
+
+### Writes are atomic
+
+Configuration writes use `FileView.atomicWrites`.
+
+### Latest state wins
+
+Concurrent mutations are collapsed into the latest queued document.
+
+### Invalid JSON is not silently destroyed
+
+Malformed files are reported rather than automatically replacing known-good configuration (except the never-ready boot case).
+
+### Logical keys hide filesystem details
+
+Services work with:
+
+```text
+homeConfig
+networkConfig
+```
+
+instead of repeating physical paths.
+
+### Unknown configuration keys fallback safely
+
+Normal config reads/writes use:
+
+```text
+unknown key → homeConfig (warn once)
+```
+
+### Registry keys do not fallback
+
+Registry CRUD requires exact keys.
+
+### `homeConfig` is protected
+
+The permanent default key cannot be updated or removed through registry CRUD.
+
+### One physical file gets one logical key
+
+Duplicate physical registrations are rejected.
+
+### Registry deletion does not delete data
+
+Removing a logical registration only removes N0ctOS's reference to the file. The physical JSON remains.
+
+### UI stays simple
+
+UI code should care about:
+
+```text
+what configuration value it needs
+```
+
+not:
+
+```text
+where the file is
+how it is watched
+how JSON is parsed
+how writes are queued
+how directories are created
+```
+
+---
+
+## 6.14 What UI / service code should not do
+
+UI and normal service code should not:
+
+```text
+create a second FileView for the same configuration
+read config.json directly
+write JSON manually
+poll configuration files with Timer
+implement its own save queue
+implement its own JSON parser
+hard-code duplicated absolute config paths
+replace the complete document when one property changes
+manually watch files that ConfigStore already owns
+delete configuration files when removing a registry key
+assign Config.isDebugLogging (read-only mirror)
+```
+
+Instead of:
+
+```qml
+FileView {
+    path:
+        "/home/user/.config/N0ctOS/config.json"
+
+    watchChanges:
+        true
+}
+```
+
+use:
+
+```qml
+Config.get(
+    "some.value",
+    defaultValue
+)
+```
+
+or, for store-level access:
+
+```qml
+ConfigStore.get(
+    "some.value",
+    defaultValue
+)
+```
+
+Instead of manually writing JSON, use:
+
+```qml
+ConfigStore.set(...)
+```
+
+or:
+
+```qml
+ConfigStore.update(...)
+```
+
+Instead of polling:
+
+```qml
+Timer {
+    interval: 1000
+    repeat: true
+}
+```
+
+rely on the reactive store.
+
+Instead of directly changing the registry object:
+
+```qml
+ConfigStore.paths.foo = "/some/path"
+```
+
+use:
+
+```qml
+ConfigStore.registerPath(...)
+```
+
+or:
+
+```qml
+ConfigStore.updatePath(...)
+```
+
+or:
+
+```qml
+ConfigStore.removePath(...)
+```
+
+depending on the intended operation.
+
+Instead of assigning the facade mirror:
+
+```qml
+Config.isDebugLogging = false
+```
+
+use:
+
+```qml
+ConfigStore.isDebugLogging = false
+```
+
+---
+
+## 6.15 Final architecture summary
+
+The ConfigStore service is designed around one simple rule:
+
+```text
+Configuration is shared reactive state,
+not a collection of files that every component
+has to manage independently.
+```
+
+The complete architecture is:
+
+```text
+                     N0ctOS
+                        │
+         ┌──────────────┴──────────────┐
+         │                             │
+      UI / Services                   IPC
+         │                             │
+         └──────────────┬──────────────┘
+                        ▼
+                   Config.qml
+                   (facade)
+                        │
+                        ▼
+                 ConfigStore.qml
+                 (backing store)
+                        │
+         ┌──────────────┼────────────────┐
+         │              │                │
+         ▼              ▼                ▼
+    homeConfig    networkConfig    other configs
+         │              │                │
+         ▼              ▼                ▼
+   controller     controller       controller
+    (FileView)     (FileView)       (FileView)
+         │              │                │
+         └──────────────┼────────────────┘
+                        ▼
+                 filesystem events
+                        │
+                        ▼
+                  debounce (80 ms)
+                        │
+                        ▼
+                     reload
+                        │
+                        ▼
+               reactive documents
+                        │
+                        ▼
+                  N0ctOS UI
+```
+
+The intended data flow is therefore:
+
+```text
+READ
+
+file
+ ↓
+FileView
+ ↓
+JSON
+ ↓
+document
+ ↓
+ConfigStore
+ ↓
+Config
+ ↓
+service / UI
+
+
+WRITE (autosave; baseline untouched)
+
+service / UI
+ ↓
+ConfigStore.set/update/remove/undo/redo/revert
+ ↓
+document (revision++, documentUpdated)
+ ↓
+isDirty = (document != baseline)
+ ↓
+save queue
+ ↓
+FileView
+ ↓
+atomic write
+ ↓
+filesystem (onSaved clears pipeline flags only)
+
+
+CHECKPOINT (save)
+
+save() → baseline = current + clearHistory()
+    (sync when idle, deferred to onSaved while
+     writes are in flight; forced rewrite when
+     writeFailed)
+
+
+EXTERNAL CHANGE (undoable)
+
+filesystem
+ ↓
+FileView watcher
+ ↓
+debounce
+ ↓
+reload
+ ↓
+JSON
+ ↓
+document + externalReload history entry
+    (baseline stays, isDirty = true)
+ ↓
+revision++
+ ↓
+documentUpdated + externalReload(fileKey)
+ ↓
+reactive QML updates (undo() restores + autosaves)
+
+
+PATH REGISTRY
+
+service
+ ↓
+ConfigStore.registerPath()
+ ↓
+registry
+ ↓
+controller (via pathKeys Instantiator)
+ ↓
+FileView
+
+
+PATH UPDATE
+
+ConfigStore.updatePath()
+ ↓
+validate
+ ↓
+replace mapping
+ ↓
+reset document/state
+ ↓
+reload new file
+
+
+PATH DELETE
+
+ConfigStore.removePath()
+ ↓
+validate
+ ↓
+remove mapping
+ ↓
+remove document/state/history/baseline
+ ↓
+destroy controller (via pathKeys)
+ ↓
+physical file remains
+```
+
+The core rule is:
+
+> **Components declare what configuration value they need; `Config.qml` decides which registered document it comes from; `ConfigStore.qml` handles how files are registered, watched, parsed, queued, persisted, and exposed over IPC.**

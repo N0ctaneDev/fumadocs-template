@@ -1,0 +1,6 @@
+{
+  "title": "N0ctOS Docs",
+  "description": "Developer documentation for N0ctOS",
+  "icon": "BookOpen", 
+  "pages": ["index", "shell"]
+}

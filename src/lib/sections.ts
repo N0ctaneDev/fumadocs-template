@@ -6,7 +6,12 @@
 export type SectionEntry = { slug: string; label: string };
 
 export const SECTIONS: Record<string, SectionEntry[]> = {
-  "docs": [],
+  "docs": [
+    {
+      "slug": "shell",
+      "label": "Shell"
+    }
+  ],
   "n0shop": [
     {
       "slug": "default",

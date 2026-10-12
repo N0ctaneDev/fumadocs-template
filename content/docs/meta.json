@@ -1,0 +1,6 @@
+{
+  "title": "test Docs",
+  "description": "Developer documentation for N0ctOS",
+  "icon": "BookOpen",
+  "pages": ["index"]
+}

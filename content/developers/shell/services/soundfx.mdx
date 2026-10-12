@@ -1,0 +1,1605 @@
+---
+title: "SoundFX Service"
+description: "SoundFX.qml is N0ctOS's centralized sound-effects service."
+---
+
+`SoundFX.qml` is N0ctOS's centralized sound-effects service.
+
+It gives every shell component one consistent place to play UI sounds, run ambient loops, manage named sound profiles, and control a global master volume without touching `MediaPlayer`, `AudioOutput`, or configuration files directly.
+
+The service supports per-profile sound definitions, one-shot playback with overlap, exactly-one-loop-per-sound ambient loops, preloaded retained voices, per-sound and master volume multiplication, profile enable/disable, lazy voice release, and a full IPC interface.
+
+The normal usage pattern is:
+
+```text
+Component
+    │
+    ▼
+SoundFX
+    │
+    ├── profile / isEnabled / masterVolume
+    ├── play / loop / stop / stopAllLoops
+    ├── getSFX / setSFX / isSFXEnabled
+    └── profiles (create/select/rename/remove)
+    │
+    ▼
+Config + QtMultimedia
+    │
+    ├── homeConfig (soundfx.*)
+    └── MediaPlayer + AudioOutput voices
+```
+
+---
+
+# 1. What does it do?
+
+`SoundFX.qml` maps simple function calls to QtMultimedia playback voices.
+
+A component can play a one-shot:
+
+```qml
+SoundFX.play("click")
+```
+
+or run an ambient loop:
+
+```qml
+SoundFX.loop("ambient")
+```
+
+or stop it:
+
+```qml
+SoundFX.stop("ambient")
+```
+
+A minimal configuration looks like:
+
+```json
+{
+    "soundfx": {
+        "profile": "default",
+        "masterVolume": 1.0,
+        "profiles": {
+            "default": {
+                "enabled": true,
+                "sounds": {
+                    "click": {
+                        "path": "/usr/share/N0ctOS/sounds/click.mp3",
+                        "volume": 0.8,
+                        "preload": true,
+                        "enabled": true
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+or with several profiles:
+
+```json
+{
+    "soundfx": {
+        "profile": "gaming",
+        "masterVolume": 0.9,
+        "profiles": {
+            "default": {
+                "enabled": true,
+                "sounds": {}
+            },
+            "gaming": {
+                "enabled": true,
+                "sounds": {
+                    "click": {
+                        "path": "/usr/share/N0ctOS/sounds/click.mp3",
+                        "volume": 1.0,
+                        "preload": true,
+                        "enabled": true
+                    },
+                    "ambient": {
+                        "path": "/usr/share/N0ctOS/sounds/ambient.ogg",
+                        "volume": 0.5,
+                        "preload": false,
+                        "enabled": true
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+The effective playback volume is always:
+
+```text
+AudioOutput.volume = sound.volume * masterVolume
+```
+
+So a component can simply do:
+
+```qml
+SoundFX.play("click")
+```
+
+and not care which profile is active, what the master volume is, whether the sound is preloaded, or how voices are recycled.
+
+If the current profile is disabled, the sound is disabled, or the sound has no path, `play()` / `loop()` return `false` and nothing is heard.
+
+---
+
+# 2. UI API
+
+Import normally:
+
+```qml
+import QtQuick
+import Quickshell
+
+import qs.services
+```
+
+## Core API
+
+| How to call | What does it do |
+| --- | --- |
+| `SoundFX.profile` | Active profile name (`soundfx.profile`, default `"default"`). Bound to `Config.revision`. |
+| `SoundFX.isEnabled` | Whether the active profile is enabled (`profiles.<p>.enabled !== false`). Bound to `Config.revision`. Missing profile object means `true`. |
+| `SoundFX.masterVolume` | Global master multiplier (`soundfx.masterVolume`, default `1.0`). Bound to `Config.revision`. No clamp. |
+| `SoundFX.voices` | All currently existing voice objects (one-shot + loop + preloaded). |
+| `SoundFX.activeVoiceCount` | Number of voices with `busy === true`. |
+| `SoundFX.looping` | Names of sounds with a busy loop voice. |
+| `SoundFX.loaded` | Names of sounds with a configured voice whose definition path is non-empty. |
+| `SoundFX.defaultMasterVolume` | Constant `1.0`. Fallback when the stored master volume is missing or non-numeric. |
+| `SoundFX.defaultProfileEnabled` | Constant `true`. Fallback when the profile object is missing. |
+| `SoundFX.getStatus()` | Returns `{ready, profile, isEnabled, masterVolume, activeVoiceCount, looping, loaded}`. |
+| `SoundFX.getSFX(obj)` | Reads a whole sound object or one nested property (see target forms). Returns `null` when the name is empty or missing. |
+| `SoundFX.setSFX(obj, data)` | Writes a whole sound object or one nested property via `Config.set()`. Missing objects/paths are created automatically. Returns `false` when the name is empty, else `true`. |
+| `SoundFX.isSFXEnabled(obj)` | Reads the `enabled` property of a sound as `bool`. Forces `property = "enabled"` on the parsed target. |
+| `SoundFX.play(name)` | Plays a one-shot. Returns `true` when a voice started. |
+| `SoundFX.loop(name)` | Starts (or reuses) the single loop voice for a sound. Returns `true` when looping. |
+| `SoundFX.stop(name)` | Stops the loop voice for a sound. Returns `false` when no loop voice exists. One-shots cannot be stopped this way. |
+| `SoundFX.stopAllLoops()` | Stops every loop voice. Always returns `true`. |
+| `SoundFX.isLooping(name)` | `true` when a busy loop voice exists for the name. |
+| `SoundFX.createProfile(name, data)` | Creates `soundfx.profiles.<name>` with `data` (must be a non-array object). Returns `false` when the name is empty, the profile exists, or `data` is not an object. |
+| `SoundFX.getProfile(name)` | Returns the profile object, or `null` when the name is empty or missing. |
+| `SoundFX.renameProfile(from, to)` | Copies profile data to the new name, removes the old one, and moves `soundfx.profile` when the renamed profile was active. Returns `false` on empty/same names, missing source, or existing destination. |
+| `SoundFX.selectProfile(name)` | Sets `soundfx.profile`. Stops all voices first when switching to a different profile. Returns `false` when the name is empty or unknown. |
+| `SoundFX.removeProfile(name)` | Removes a profile. Refuses `"default"`. When the removed profile was active, resets `soundfx.profile` to `"default"` and stops all voices. Returns `false` on empty/`default`/unknown names. |
+| `SoundFX.setMasterVolume(value)` | Stores `soundfx.masterVolume` exactly as given. No `0..1` cap. Returns `false` for non-finite input. |
+| `SoundFX.getMasterVolume()` | Returns the effective master volume (stored value or `1.0` fallback). |
+
+| Example | Result |
+| --- | --- |
+| `SoundFX.play("click")` | `true`, one-shot voice starts (`false` when profile/sound disabled or path empty) |
+| `SoundFX.loop("ambient")` | `true`, loop voice starts (`true` again when already looping and busy) |
+| `SoundFX.stop("ambient")` | `true`, loop stops (`false` when no loop voice exists) |
+| `SoundFX.stopAllLoops()` | `true`, every loop voice stops |
+| `SoundFX.isLooping("ambient")` | `true` while the loop voice is busy |
+| `SoundFX.getSFX("click")` | whole `{path, volume, preload, enabled}` object, or `null` |
+| `SoundFX.getSFX("click.path")` | path string, or `null` |
+| `SoundFX.setSFX("click", {...})` | `true`, sound object written |
+| `SoundFX.setSFX("click.path", "/x/y.mp3")` | `true`, single property written |
+| `SoundFX.isSFXEnabled("click")` | `true` / `false` |
+| `SoundFX.getStatus()` | `{ready, profile, isEnabled, masterVolume, activeVoiceCount, looping, loaded}` |
+| `SoundFX.createProfile("gaming", {enabled: true, sounds: {}})` | `true`, profile created (`false` when it exists) |
+| `SoundFX.getProfile("gaming")` | profile object, or `null` |
+| `SoundFX.renameProfile("gaming", "work")` | `true`, data moved |
+| `SoundFX.selectProfile("gaming")` | `true`, active profile switches (voices stopped when changed) |
+| `SoundFX.removeProfile("gaming")` | `true`, profile removed (`false` for `"default"`) |
+| `SoundFX.setMasterVolume(0.5)` | `true`, master becomes `0.5` |
+| `SoundFX.setMasterVolume(1.5)` | `true`, master becomes `1.5` (no clamp) |
+| `SoundFX.getMasterVolume()` | effective master volume, e.g. `0.5` |
+
+## Target-string forms
+
+`getSFX()` / `setSFX()` / `isSFXEnabled()` accept three target forms:
+
+```text
+"click"
+    → {name: "click", property: "", profile: <active>}
+
+"click.path"
+    → {name: "click", property: "path", profile: <active>}
+
+{name, property, profile}
+    → explicit object form
+```
+
+For example:
+
+```qml
+SoundFX.getSFX("click")
+```
+
+returns the whole sound object, while:
+
+```qml
+SoundFX.getSFX("click.path")
+```
+
+returns only the path.
+
+Scoped to another profile:
+
+```qml
+SoundFX.getSFX({
+    name: "click",
+    profile: "gaming"
+})
+```
+
+returns the whole `click` sound from `gaming`, and:
+
+```qml
+SoundFX.getSFX({
+    name: "click",
+    property: "path",
+    profile: "gaming"
+})
+```
+
+returns only its path.
+
+A convenience object form is also accepted:
+
+```qml
+SoundFX.getSFX({
+    path: "click.volume",
+    profile: "gaming"
+})
+```
+
+where `path` is split into `name` + `property` when no explicit `name`/`property` is supplied.
+
+Sound names are intentionally the public namespace. There is no:
+
+```text
+sound.click
+sounds.click
+soundfx.sounds.click
+```
+
+externally. The `soundfx.profiles.<p>.sounds.<n>` config path is internal and built by `_soundConfigPath()`.
+
+`setSFX()` mirrors the same forms for writing:
+
+```qml
+SoundFX.setSFX(
+    "click",
+    {
+        path: "/usr/share/N0ctOS/sounds/click.mp3",
+        volume: 0.8,
+        preload: true,
+        enabled: true
+    }
+)
+```
+
+```qml
+SoundFX.setSFX(
+    "click.path",
+    "/usr/share/N0ctOS/sounds/click.mp3"
+)
+```
+
+```qml
+SoundFX.setSFX(
+    {
+        name: "click",
+        profile: "gaming"
+    },
+    {
+        path: "/usr/share/N0ctOS/sounds/click.mp3",
+        volume: 0.8,
+        preload: true,
+        enabled: true
+    }
+)
+```
+
+Because `setSFX()` uses `Config.set()` directly, a missing profile/sound/property path is created automatically.
+
+## Signals
+
+| How to listen | What does it do |
+| --- | --- |
+| `soundStarted(name)` | Emitted when a one-shot voice starts. |
+| `soundFinished(name)` | Emitted when a one-shot voice reaches `StoppedState` naturally. |
+| `loopStarted(name)` | Emitted when a loop voice starts. |
+| `loopStopped(name)` | Emitted when a loop voice stops (explicit `stop()`/`stopAllLoops()`, profile switch, config removal, or natural stop). |
+| `playbackError(name, errorString)` | Emitted when a voice's `MediaPlayer` reports an error. |
+| `configurationChanged()` | Emitted after every `_reconcile()` run and after profile-disabled teardown. |
+
+### Typical component usage
+
+```qml
+Text {
+    text: SoundFX.profile
+}
+
+Text {
+    text:
+        SoundFX.isEnabled
+            ? "Sound on"
+            : "Sound off"
+}
+
+MouseArea {
+    anchors.fill: parent
+
+    onClicked:
+        SoundFX.play("click")
+}
+```
+
+A volume control:
+
+```qml
+Slider {
+    from: 0
+    to: 1.5
+    value: SoundFX.masterVolume
+
+    onMoved:
+        SoundFX.setMasterVolume(value)
+}
+```
+
+The upper bound is intentionally above `1.0` because `setMasterVolume()` applies no clamp.
+
+That is the intended everyday usage.
+
+Components normally should not need to know how profiles, voices, preload reconciliation, or `MediaPlayer` lifecycles work.
+
+---
+
+# 3. IPC API
+
+IPC target:
+
+```text
+n0ctos-soundfx
+```
+
+## Global state
+
+| How to call | What does it do |
+| --- | --- |
+| `getStatus` | Returns `getStatus()` as JSON. |
+| `getMasterVolume` | Returns the effective master volume. |
+
+| Example | Result |
+| --- | --- |
+| `qs ipc call n0ctos-soundfx getStatus` | JSON `{ready, profile, isEnabled, masterVolume, activeVoiceCount, looping, loaded}` |
+| `qs ipc call n0ctos-soundfx getMasterVolume` | e.g. `1` or `0.5` |
+
+```bash
+qs ipc call n0ctos-soundfx getStatus
+```
+
+returns e.g.:
+
+```json
+{
+    "ready": true,
+    "profile": "default",
+    "isEnabled": true,
+    "masterVolume": 1.0,
+    "activeVoiceCount": 0,
+    "looping": [],
+    "loaded": ["click"]
+}
+```
+
+## Playback operations
+
+| How to call | What does it do |
+| --- | --- |
+| `play <name>` | Plays a one-shot. Returns `true` when a voice started. |
+| `loop <name>` | Starts the single loop voice for a sound. Returns `true` when looping. |
+| `stop <name>` | Stops the loop voice for a sound. Returns `false` when none exists. |
+| `stopAllLoops` | Stops every loop voice. Always returns `true`. |
+| `isLooping <name>` | Returns whether a busy loop voice exists for the name. |
+
+| Example | Result |
+| --- | --- |
+| `qs ipc call n0ctos-soundfx play click` | `true` when the one-shot started |
+| `qs ipc call n0ctos-soundfx loop ambient` | `true` when the loop started (or was already busy) |
+| `qs ipc call n0ctos-soundfx stop ambient` | `true` when a loop voice was stopped |
+| `qs ipc call n0ctos-soundfx stopAllLoops` | `true` |
+| `qs ipc call n0ctos-soundfx isLooping ambient` | `true` while looping, else `false` |
+
+```bash
+qs ipc call n0ctos-soundfx play click
+```
+
+```bash
+qs ipc call n0ctos-soundfx loop ambient
+```
+
+```bash
+qs ipc call n0ctos-soundfx stop ambient
+```
+
+```bash
+qs ipc call n0ctos-soundfx stopAllLoops
+```
+
+```bash
+qs ipc call n0ctos-soundfx isLooping ambient
+```
+
+`play()` intentionally has no matching stop IPC because one-shot voices are not interceptable by the public API.
+
+## Sound operations
+
+| How to call | What does it do |
+| --- | --- |
+| `getSFX <target>` | Returns the sound object or nested property as JSON (`"null"` when missing). `<target>` is a plain string or a JSON object `{name, property, profile}`. |
+| `setSFX <target> <json>` | Parses `<json>` and writes it through `setSFX()`. `<target>` is a plain string or a JSON object. Returns `false` on invalid JSON or empty name. |
+| `isEnabled <target>` | Returns whether the sound's `enabled` flag is set. `<target>` is a plain string or a JSON object. |
+
+| Example | Result |
+| --- | --- |
+| `qs ipc call n0ctos-soundfx getSFX click` | `'{"path":"...","volume":0.8,...}'` or `"null"` |
+| `qs ipc call n0ctos-soundfx getSFX click.path` | `'"/usr/share/..."'` or `"null"` |
+| `qs ipc call n0ctos-soundfx getSFX '{"name":"click","profile":"gaming"}'` | sound object from `gaming` as JSON |
+| `qs ipc call n0ctos-soundfx getSFX '{"name":"click","property":"path","profile":"gaming"}'` | path from `gaming` as JSON |
+| `qs ipc call n0ctos-soundfx setSFX click '{"path":"...","volume":0.8,"preload":true,"enabled":true}'` | `true` when written |
+| `qs ipc call n0ctos-soundfx setSFX click.path '"/usr/share/N0ctOS/sounds/click.mp3"'` | `true` when written |
+| `qs ipc call n0ctos-soundfx isEnabled click` | `true` / `false` |
+
+```bash
+qs ipc call \
+    n0ctos-soundfx \
+    setSFX \
+    click \
+    '{"path":"/usr/share/N0ctOS/sounds/click.mp3","volume":0.8,"preload":true,"enabled":true}'
+```
+
+```bash
+qs ipc call \
+    n0ctos-soundfx \
+    setSFX \
+    click.path \
+    '"/usr/share/N0ctOS/sounds/click.mp3"'
+```
+
+```bash
+qs ipc call \
+    n0ctos-soundfx \
+    getSFX \
+    click
+```
+
+```bash
+qs ipc call \
+    n0ctos-soundfx \
+    getSFX \
+    '{"name":"click","property":"path","profile":"gaming"}'
+```
+
+Both `<target>` and `<json>` handling `JSON.parse()` the argument first: when parsing yields a non-array object it is used as the structured target/value, otherwise the raw string is used.
+
+## Profile operations
+
+| How to call | What does it do |
+| --- | --- |
+| `createProfile <name> <json>` | Creates a profile from parsed JSON (must be an object). Returns `false` on invalid JSON, empty name, existing profile, or non-object data. |
+| `getProfile <name>` | Returns the profile object as JSON (`"null"` when empty/missing). |
+| `renameProfile <from> <to>` | Moves profile data and follows the active profile. |
+| `selectProfile <name>` | Sets the active profile (stops voices on change). |
+| `removeProfile <name>` | Removes a profile (refuses `"default"`; resets active to `"default"` when needed). |
+
+| Example | Result |
+| --- | --- |
+| `qs ipc call n0ctos-soundfx createProfile gaming '{"enabled":true,"sounds":{}}'` | `true` when created |
+| `qs ipc call n0ctos-soundfx getProfile gaming` | profile JSON, or `"null"` |
+| `qs ipc call n0ctos-soundfx renameProfile gaming work` | `true` when renamed |
+| `qs ipc call n0ctos-soundfx selectProfile gaming` | `true` when selected |
+| `qs ipc call n0ctos-soundfx removeProfile gaming` | `true` when removed |
+
+```bash
+qs ipc call n0ctos-soundfx createProfile gaming '{"enabled":true,"sounds":{}}'
+```
+
+```bash
+qs ipc call n0ctos-soundfx selectProfile gaming
+```
+
+```bash
+qs ipc call n0ctos-soundfx removeProfile gaming
+```
+
+## Master-volume operations
+
+| How to call | What does it do |
+| --- | --- |
+| `setMasterVolume <value>` | Stores the master volume with no clamp. Returns `false` for non-finite input. |
+
+| Example | Result |
+| --- | --- |
+| `qs ipc call n0ctos-soundfx setMasterVolume 0.5` | `true`, master becomes `0.5` |
+
+```bash
+qs ipc call n0ctos-soundfx setMasterVolume 0.5
+```
+
+---
+
+# 4. Features / limitations
+
+## Features
+
+### Single entry point for UI sounds
+
+All sound effects go through:
+
+```text
+SoundFX.qml
+```
+
+instead of each button, popup, or OSD creating its own:
+
+```text
+MediaPlayer + AudioOutput
+```
+
+### Profile-based sound sets
+
+Each profile owns an independent sound table:
+
+```text
+soundfx.profiles.<name>
+    ├── enabled (bool, default true)
+    └── sounds.<soundName>
+        ├── path (string)
+        ├── volume (real, default 1.0)
+        ├── preload (bool, default false)
+        └── enabled (bool, default true)
+```
+
+Switching profiles switches the whole audible personality at once:
+
+```qml
+SoundFX.selectProfile("gaming")
+```
+
+`selectProfile()` stops all voices when the profile actually changes, so sounds from the old profile never bleed into the new one.
+
+### `profiles.default` auto-creation
+
+On startup, when `Config.isReady` and no `default` profile exists:
+
+```text
+soundfx.profiles.default = {enabled: true, sounds: {}}
+```
+
+`default` is the permanent fallback:
+
+```text
+removeProfile("default") → false
+removeProfile(<active>) → profile resets to "default"
+```
+
+### Target-string resolution
+
+Callers use short sound names:
+
+```qml
+SoundFX.play("click")
+SoundFX.getSFX("click.path")
+```
+
+`_parseTarget()` normalizes:
+
+```text
+"click"                → name=click, property=""
+"click.path"           → name=click, property=path
+{name, property, profile} → explicit
+{path: "click.volume"}    → split into name+property
+```
+
+`_splitTargetPath()` splits on the first `.` only, so:
+
+```text
+"click.path" → name "click", property "path"
+```
+
+Nested property reads use `_deepGet()` with `.` splitting, so deeper paths also resolve.
+
+When no explicit profile is given, `_profileName()` uses the active `soundfx.profile` (trimmed, default `"default"`).
+
+### Definition normalization
+
+`_definition(name)` converts the raw config object into playback-ready data:
+
+```text
+path    = String(value.path || "")
+volume  = Number(value.volume), fallback 1.0 when non-finite
+preload = value.preload === true
+enabled = value.enabled !== false
+```
+
+A definition that is missing, disabled, or has an empty path never produces a voice. Both `play()` and `loop()` check this before allocating.
+
+### One-shot overlap
+
+One-shots are allowed to overlap:
+
+```text
+play("click")
+    ├── reuse idle retained/preloaded voice first
+    └── else create a second temporary voice
+```
+
+A busy preloaded voice is never stolen mid-playback; a fresh temporary voice is created instead. This is why rapid clicking produces overlapping clicks rather than cut-off audio.
+
+### Exactly one loop per sound
+
+Loops enforce a singleton voice:
+
+```text
+loop("ambient")
+    ├── existing loop voice?
+    │     ├── busy → return true (already looping)
+    │     └── idle → reconfigure + start + loopStarted
+    └── else create one loop voice + start + loopStarted
+```
+
+Calling `loop()` twice does not stack two ambient layers.
+
+### Voice lifecycle (MediaPlayer + AudioOutput + releaseTimer)
+
+Every voice is:
+
+```text
+Item (voice)
+    ├── AudioOutput (volume = soundVolume * masterVolume)
+    ├── MediaPlayer (loops = Infinite for loops, 1 for one-shots)
+    └── Timer (releaseTimer, 1000 ms, non-repeating)
+```
+
+The volume binding is live:
+
+```qml
+AudioOutput.volume = soundVolume * masterVolume
+```
+
+so changing `masterVolume` affects already-loaded voices without reconfiguration.
+
+Idle voices linger for one second:
+
+```text
+voice becomes idle (natural finish / stopLoop / error)
+    ├── stale or !keepLoaded → releaseTimer.restart()
+    └── releaseTimer fires + !busy → _destroyVoice()
+```
+
+Preloaded (`keepLoaded`) voices skip the timer and stay resident until the definition changes, preload is disabled, or the sound disappears.
+
+### Preload reconciliation
+
+Every `Config.revision` change (while `Config.isReady`) runs `_reconcile()`:
+
+```text
+profile disabled → stop everything + configurationChanged
+
+else:
+    desired = sounds with enabled && preload && path !== ""
+        ├── missing retained voice → create + configure
+        └── existing retained voice with changed path/volume/preload/enabled → reconfigure
+
+    stale pass over all voices:
+        ├── definition missing/disabled/path empty → mark stale
+        │     ├── loop → stop + destroy (+ loopStopped)
+        │     └── one-shot idle → destroy (busy one-shots finish first)
+        ├── keepLoaded but preload now false → keepLoaded=false + restart release timer
+        └── keepLoaded but no longer desired + idle → keepLoaded=false + restart release timer
+
+    configurationChanged()
+```
+
+`enabled` always wins over `preload`: a disabled sound is never preloaded, even with `preload: true`.
+
+### Reactive configuration
+
+`profile`, `isEnabled`, and `masterVolume` are bindings over `Config.revision`:
+
+```qml
+readonly property string profile: {
+    Config.revision
+    return root._currentProfile()
+}
+```
+
+External config edits (file, IPC, another component) propagate without an explicit reload call. `_reconcile()` also runs on `onRevisionChanged` so voices track the new definitions.
+
+### Change signals
+
+Imperative consumers (OSDs, debug overlays, logging) use:
+
+```text
+soundStarted(name)   → one-shot began
+soundFinished(name)  → one-shot ended naturally
+loopStarted(name)    → loop began
+loopStopped(name)    → loop ended
+playbackError(name, errorString) → MediaPlayer error
+configurationChanged() → reconcile pass finished
+```
+
+Reactive bindings (profile text, volume sliders, looping indicators) do not need these signals.
+
+### Config integration
+
+The service does not implement its own JSON persistence. All state lives in:
+
+```text
+soundfx.profile
+soundfx.masterVolume
+soundfx.profiles.<name>
+soundfx.profiles.<name>.sounds.<sound>
+```
+
+inside:
+
+```text
+homeConfig
+```
+
+via `Config.get()` / `Config.set()` / `Config.remove()` / `Config.has()`.
+
+### JSON serialization for IPC
+
+`getStatus()` returns a plain object that is `JSON.stringify()`-ed by IPC. `getSFX()` / `getProfile()` results are likewise stringified (`"null"` when missing), so terminal scripts receive valid JSON.
+
+---
+
+## Limitations
+
+### No `0..1` clamp on master volume
+
+`setMasterVolume()` retains the value exactly:
+
+```qml
+SoundFX.setMasterVolume(1.5) // stored as 1.5
+```
+
+Qt's `AudioOutput` applies its own final playback range. The service intentionally does not cap, mirroring the stored value in `getMasterVolume()` / `masterVolume`.
+
+Non-finite input (`NaN`, `Infinity`, non-numeric strings) returns `false` and stores nothing. Reads of a missing/non-numeric stored value fall back to `1.0`.
+
+### One-shots cannot be stopped
+
+There is no `stopOneShot()`:
+
+```qml
+SoundFX.stop("click") // looks for a LOOP voice named "click"
+```
+
+`stop()` only resolves `_findLoopVoice()`. A one-shot, once started, plays to completion (or until a profile switch / disable destroys its voice).
+
+### Profile names are trimmed strings
+
+`_cleanProfileName()` trims whitespace. Empty-after-trim names are rejected by every profile function. Profile names are case-sensitive and must be valid `Config` path segments (no dots — a dot would create a nested config path).
+
+### `createProfile()` requires an object
+
+```qml
+SoundFX.createProfile("gaming", {...}) // object required
+```
+
+Arrays, strings, numbers, `null`, and `undefined` return `false`. Existing profiles are never overwritten — use `setSFX()` with a `{name, profile}` target or `Config.set()` to edit an existing profile.
+
+### `renameProfile()` copies then deletes
+
+Rename is not atomic at the config level:
+
+```text
+1. Config.set("soundfx.profiles.<to>", data)
+2. Config.remove("soundfx.profiles.<from>")
+3. maybe Config.set("soundfx.profile", <to>)
+```
+
+Renaming to an existing name, renaming a missing source, or renaming with empty/same names all return `false`.
+
+### Profile switching destroys voices
+
+`selectProfile()` to a different profile calls `_stopAllVoices()` before switching. Both one-shots and loops are destroyed, not faded. `removeProfile()` of the active profile does the same while resetting to `"default"`.
+
+### Missing profile object means enabled
+
+When the active profile has no stored object:
+
+```text
+_currentProfileEnabled() → true
+```
+
+A profile only disables playback when its stored `enabled` field is explicitly `false`. This keeps fresh installs audible before any profile object exists.
+
+### Sound-level `enabled` overrides everything
+
+A sound with `enabled: false` is never played, looped, or preloaded, regardless of profile `enabled` or `preload` flags. `configure()` and `start()` both re-check this.
+
+### IPC JSON must be valid
+
+`setSFX` / `createProfile` IPC parse `<json>` with `JSON.parse()` and return `false` on failure with a `[SoundFX]` warning. String sound values must therefore be JSON-quoted:
+
+```bash
+qs ipc call n0ctos-soundfx setSFX click.path '"/path/to.mp3"'
+```
+
+### No per-voice volume IPC
+
+There is no `setVolume <name> <value>` IPC. Per-sound volume is config state — write it via `setSFX <name>.volume <json-number>` and the live `AudioOutput.volume` binding picks it up.
+
+---
+
+# 5. Example use cases
+
+## 5.1 Click sounds on buttons
+
+The most common usage — one line per interaction:
+
+```qml
+import QtQuick
+import Quickshell
+
+import qs.services
+
+MouseArea {
+    anchors.fill: parent
+
+    onClicked: {
+        SoundFX.play("click")
+        // ... rest of click handling
+    }
+}
+```
+
+When the profile is disabled or the sound has no path, `play()` returns `false` and the click handling still runs — audio never blocks UI logic.
+
+---
+
+## 5.2 A mute / enable toggle
+
+Bind to the reactive `isEnabled` state:
+
+```qml
+import QtQuick
+import Quickshell
+
+import qs.services
+
+Row {
+    spacing: 8
+
+    Text {
+        text:
+            SoundFX.isEnabled
+                ? "Sound on"
+                : "Sound off"
+    }
+
+    MouseArea {
+        onClicked: {
+            const profile =
+                SoundFX.getProfile(
+                    SoundFX.profile
+                )
+
+            SoundFX.setSFX(
+                {
+                    name: "__profile__",
+                    profile: SoundFX.profile
+                },
+                {}
+            )
+        }
+    }
+}
+```
+
+In practice, toggling the profile flag is a config write on the profile object:
+
+```qml
+Config.set(
+    "soundfx.profiles." + SoundFX.profile + ".enabled",
+    !SoundFX.isEnabled
+)
+```
+
+The service picks it up via `Config.revision` and `_reconcile()` releases voices when disabled.
+
+From IPC, disable one sound without touching the profile:
+
+```bash
+qs ipc call \
+    n0ctos-soundfx \
+    setSFX \
+    click.enabled \
+    false
+```
+
+---
+
+## 5.3 Master-volume slider
+
+Because there is no clamp, allow amplification above `1.0` when desired:
+
+```qml
+Slider {
+    from: 0
+    to: 1.5
+    value: SoundFX.masterVolume
+
+    onMoved:
+        SoundFX.setMasterVolume(value)
+}
+```
+
+Read back:
+
+```qml
+Text {
+    text:
+        Math.round(
+            SoundFX.masterVolume * 100
+        ) + "%"
+}
+```
+
+From IPC:
+
+```bash
+qs ipc call n0ctos-soundfx setMasterVolume 0.5
+```
+
+```bash
+qs ipc call n0ctos-soundfx getMasterVolume
+```
+
+---
+
+## 5.4 Ambient loops
+
+Start an ambient bed once (e.g. when entering a mode) and stop it on exit:
+
+```qml
+SoundFX.loop("ambient")
+
+// later
+SoundFX.stop("ambient")
+```
+
+Guard with `isLooping()` to avoid redundant work:
+
+```qml
+if (!SoundFX.isLooping("ambient")) {
+    SoundFX.loop("ambient")
+}
+```
+
+Stop everything at once (e.g. on profile switch preview or shutdown):
+
+```qml
+SoundFX.stopAllLoops()
+```
+
+From IPC:
+
+```bash
+qs ipc call n0ctos-soundfx loop ambient
+```
+
+```bash
+qs ipc call n0ctos-soundfx isLooping ambient
+```
+
+```bash
+qs ipc call n0ctos-soundfx stop ambient
+```
+
+```bash
+qs ipc call n0ctos-soundfx stopAllLoops
+```
+
+---
+
+## 5.5 Defining a new sound
+
+Whole-object write (creates the path if missing):
+
+```qml
+SoundFX.setSFX(
+    "notify",
+    {
+        path: "/usr/share/N0ctOS/sounds/notify.mp3",
+        volume: 0.7,
+        preload: true,
+        enabled: true
+    }
+)
+```
+
+Single-property tweak:
+
+```qml
+SoundFX.setSFX(
+    "notify.volume",
+    0.5
+)
+```
+
+Read it back:
+
+```qml
+const def = SoundFX.getSFX("notify")
+const path = SoundFX.getSFX("notify.path")
+const enabled = SoundFX.isSFXEnabled("notify")
+```
+
+From IPC:
+
+```bash
+qs ipc call \
+    n0ctos-soundfx \
+    setSFX \
+    notify \
+    '{"path":"/usr/share/N0ctOS/sounds/notify.mp3","volume":0.7,"preload":true,"enabled":true}'
+```
+
+```bash
+qs ipc call n0ctos-soundfx getSFX notify
+```
+
+---
+
+## 5.6 Managing profiles
+
+Create and select a profile:
+
+```qml
+SoundFX.createProfile(
+    "gaming",
+    {
+        enabled: true,
+        sounds: {}
+    }
+)
+
+SoundFX.selectProfile("gaming")
+```
+
+Rename it (active selection follows):
+
+```qml
+SoundFX.renameProfile("gaming", "work")
+```
+
+Remove it (`"default"` is protected):
+
+```qml
+SoundFX.removeProfile("work")
+```
+
+Inspect:
+
+```qml
+const data = SoundFX.getProfile("gaming")
+```
+
+From IPC:
+
+```bash
+qs ipc call n0ctos-soundfx createProfile gaming '{"enabled":true,"sounds":{}}'
+```
+
+```bash
+qs ipc call n0ctos-soundfx getProfile gaming
+```
+
+```bash
+qs ipc call n0ctos-soundfx selectProfile gaming
+```
+
+```bash
+qs ipc call n0ctos-soundfx renameProfile gaming work
+```
+
+```bash
+qs ipc call n0ctos-soundfx removeProfile work
+```
+
+---
+
+## 5.7 Reacting to playback
+
+Use the signals for debug overlays or OSDs:
+
+```qml
+Connections {
+    target: SoundFX
+
+    function onSoundStarted(name) {
+        console.log("Started:", name)
+    }
+
+    function onSoundFinished(name) {
+        console.log("Finished:", name)
+    }
+
+    function onLoopStarted(name) {
+        console.log("Loop:", name)
+    }
+
+    function onLoopStopped(name) {
+        console.log("Loop stopped:", name)
+    }
+
+    function onPlaybackError(name, errorString) {
+        console.warn("Playback failed:", name, errorString)
+    }
+}
+```
+
+---
+
+## 5.8 Status panel and debugging
+
+Show live state:
+
+```qml
+Column {
+    Text { text: "Profile: " + SoundFX.profile }
+    Text { text: "Enabled: " + SoundFX.isEnabled }
+    Text { text: "Master: " + SoundFX.masterVolume }
+    Text { text: "Active: " + SoundFX.activeVoiceCount }
+    Text { text: "Looping: " + JSON.stringify(SoundFX.looping) }
+    Text { text: "Loaded: " + JSON.stringify(SoundFX.loaded) }
+}
+```
+
+Dump the full snapshot:
+
+```qml
+Text {
+    text:
+        JSON.stringify(
+            SoundFX.getStatus(),
+            null,
+            2
+        )
+}
+```
+
+From IPC:
+
+```bash
+qs ipc call n0ctos-soundfx getStatus
+```
+
+---
+
+## 5.9 Terminal workflow
+
+Check state:
+
+```bash
+qs ipc call n0ctos-soundfx getStatus
+qs ipc call n0ctos-soundfx getMasterVolume
+```
+
+Play and loop:
+
+```bash
+qs ipc call n0ctos-soundfx play click
+qs ipc call n0ctos-soundfx loop ambient
+qs ipc call n0ctos-soundfx isLooping ambient
+qs ipc call n0ctos-soundfx stop ambient
+qs ipc call n0ctos-soundfx stopAllLoops
+```
+
+Edit sounds:
+
+```bash
+qs ipc call n0ctos-soundfx getSFX click
+qs ipc call n0ctos-soundfx isEnabled click
+```
+
+Manage profiles and volume:
+
+```bash
+qs ipc call n0ctos-soundfx getProfile default
+qs ipc call n0ctos-soundfx selectProfile gaming
+qs ipc call n0ctos-soundfx setMasterVolume 0.8
+```
+
+---
+
+# 6. Detailed architecture
+
+This section is for developers working on `SoundFX.qml` and the services/components that consume it.
+
+---
+
+## 6.1 Overall architecture
+
+The service is a profile-aware voice pool over QtMultimedia with a Config-backed definition layer:
+
+```text
+N0ctOS Component / Service
+            │
+            ▼
+       SoundFX.qml
+            │
+     ┌──────┼──────────┐
+     │      │          │
+     ▼      ▼          ▼
+ Targets  Profiles   Voices
+     │      │          │
+     │      │     MediaPlayer
+     │      │     AudioOutput
+     │      │     releaseTimer
+     │      │
+     ▼      ▼
+   Config
+     │
+     ▼
+ homeConfig (soundfx.*)
+```
+
+There are effectively three responsibilities:
+
+```text
+SoundFX
+    target parsing, profile management, voice lifecycle
+
+Config
+    definition persistence and reactivity
+
+QtMultimedia
+    actual audio decoding and output
+```
+
+SoundFX should not duplicate functionality already provided by Config or QtMultimedia.
+
+---
+
+## 6.2 Configuration structure
+
+The service owns the `soundfx` section of `homeConfig`.
+
+The structure is:
+
+```json
+{
+    "soundfx": {
+        "profile": "default",
+        "masterVolume": 1.0,
+        "profiles": {
+            "default": {
+                "enabled": true,
+                "sounds": {
+                    "click": {
+                        "path": "/usr/share/N0ctOS/sounds/click.mp3",
+                        "volume": 0.8,
+                        "preload": true,
+                        "enabled": true
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+Field semantics:
+
+```text
+profile
+    active profile name (trimmed, default "default")
+
+masterVolume
+    global multiplier, stored exactly, no clamp
+
+profiles.<name>.enabled
+    profile-level gate (absent → true)
+
+profiles.<name>.sounds.<sound>.path
+    audio file path/URL ("" → never plays)
+
+profiles.<name>.sounds.<sound>.volume
+    per-sound multiplier (non-finite → 1.0)
+
+profiles.<name>.sounds.<sound>.preload
+    retain a voice when idle (strict === true only)
+
+profiles.<name>.sounds.<sound>.enabled
+    sound-level gate (only !== false plays)
+```
+
+Everything else (voices, players, timers) is runtime state, not stored configuration.
+
+---
+
+## 6.3 Profile resolution
+
+```text
+_profileName(requested)
+    ├── explicit non-empty → trimmed explicit
+    └── else Config.get("soundfx.profile", "default")
+            ├── trimmed non-empty → stored value
+            └── else "default"
+```
+
+`_currentProfile()` calls `_profileName()` with no argument, so the active profile is always the stored selection. `_currentProfileObject()` and `_currentProfileEnabled()` build on it:
+
+```text
+_currentProfileEnabled()
+    ├── no profile object → true (fresh-install audible)
+    └── else profileObject.enabled !== false
+```
+
+`_masterVolume()` reads `soundfx.masterVolume` with a `defaultMasterVolume` (`1.0`) fallback for missing/non-finite values and deliberately skips clamping.
+
+---
+
+## 6.4 Target parsing
+
+`_parseTarget(obj)` produces:
+
+```text
+{name, property, profile}
+```
+
+Object targets read `name` (or `path` as a `name` alias when `property` is absent), plus optional `property` and non-blank `profile`. When the resulting `name` contains a `.` and no explicit `property` was given, `_splitTargetPath()` splits on the first dot:
+
+```text
+"click.path" → name "click", property "path"
+```
+
+String targets assign the whole string to `name` first, then split the same way. `_soundConfigPath(profile, name, property)` then builds:
+
+```text
+soundfx.profiles.<profile>.sounds.<name>[.<property>]
+```
+
+`getSFX()` reads via `_deepGet()` (dot-splitting, `null` fallback): first the sound object at `target.name`, then the nested value at `target.property` when non-empty. `setSFX()` writes the same config path via `Config.set()`.
+
+`isSFXEnabled()` forces `target.property = "enabled"` after parsing, so:
+
+```qml
+SoundFX.isSFXEnabled("click")
+SoundFX.isSFXEnabled({name: "click", profile: "gaming"})
+```
+
+both read the sound's `enabled` flag through `getSFX()` and coerce with `Boolean()`.
+
+---
+
+## 6.5 `play()` semantics
+
+```text
+play(name)
+    ├── name empty → false
+    ├── profile disabled → false
+    ├── _definition(name) missing/disabled/path empty → false
+    ├── reuse idle non-loop voice with same name?
+    │     └── none (or busy preloaded) → create temp voice
+    ├── voice.configure(definition, loopMode=false, retainLoaded=definition.preload)
+    ├── voice.start()
+    │     └── false → return false
+    ├── soundStarted(name)
+    └── true
+```
+
+`play()` never steals a busy voice: when the retained/preloaded voice is busy, a second temporary voice carries the overlapping one-shot.
+
+---
+
+## 6.6 `loop()` / `stop()` semantics
+
+```text
+loop(name)
+    ├── name empty → false
+    ├── profile disabled → false
+    ├── _definition(name) missing/disabled/path empty → false
+    ├── existing loop voice?
+    │     ├── busy → true (already looping, no-op)
+    │     └── idle → configure + start
+    │           ├── ok → loopStarted + true
+    │           └── fail → false
+    └── else create loop voice + configure + start
+            ├── ok → loopStarted + true
+            └── fail → false
+
+stop(name)
+    ├── no loop voice → false
+    └── voice.stopLoop() → true
+
+stopAllLoops()
+    └── every isLoop voice .stopLoop() → true
+
+isLooping(name)
+    └── Boolean(loopVoice && loopVoice.busy)
+```
+
+`stop()` matches by exact `soundName` through `_findLoopVoice()`. One-shot voices are invisible to it.
+
+---
+
+## 6.7 Voice object model
+
+Each voice is an `Item` created from `voiceComponent`:
+
+```text
+voice
+    ├── soundName (string)
+    ├── isLoop (bool)
+    ├── keepLoaded (bool, preload retention)
+    ├── busy (bool, currently playing)
+    ├── started (bool, started and not yet finished/stopped)
+    ├── stale (bool, definition removed/disabled)
+    ├── definition ({name, path, volume, preload, enabled})
+    ├── playerObject → MediaPlayer
+    ├── releaseTimerObject → Timer
+    ├── configure(definition, loopMode, retainLoaded)
+    ├── start()
+    └── stopLoop()
+```
+
+`configure()` stops old playback, clears `source`, snapshots the definition (with a `1.0` volume fallback), sets `loops` (`Infinite` vs `1`), and assigns `player.source`. When the definition is disabled or pathless it records the definition but leaves the player sourceless — `start()` will then refuse.
+
+`start()` stops the release timer, sets `loops`, clears `stale`, marks `busy`/`started`, and calls `player.play()`.
+
+`stopLoop()` on a non-loop returns `false`. Otherwise it clears `busy`/`started`, stops the player, emits `loopStopped()` when it was busy, and restarts the release timer unless `keepLoaded`.
+
+Child ids (`player`, `releaseTimer`, `output`) are lexical to the component; external code must use `playerObject` / `releaseTimerObject`.
+
+---
+
+## 6.8 Natural finish and error paths
+
+`MediaPlayer.onPlaybackStateChanged` handles the natural-finish transition:
+
+```text
+playbackState → StoppedState
+    ├── !started → ignore (stopLoop/configure already cleared it)
+    ├── started=false, capture wasBusy, busy=false
+    ├── isLoop?
+    │     ├── wasBusy → loopStopped
+    │     └── stale or !keepLoaded → releaseTimer.restart()
+    └── one-shot?
+          ├── wasBusy → soundFinished
+          └── stale or !keepLoaded → releaseTimer.restart()
+```
+
+`onErrorOccurred` emits `playbackError(name, errorString)`, clears `busy`/`started`, and schedules release under the same stale/retention rule.
+
+The 1-second `releaseTimer` destroys the voice via `_destroyVoice()` when it fires while idle. `_destroyVoice()` refuses busy voices, splices the voice out of `voices`, and calls `voice.destroy()`.
+
+---
+
+## 6.9 Preload and `_reconcile()`
+
+`_reconcile()` runs on startup (when ready), on `Config.onIsReadyChanged`, and on every `Config.onRevisionChanged`. It has two phases: ensure every desired preload has a retained idle voice, then demote or destroy stale voices (see §4 for the full flow).
+
+Desired preloads are sounds in the active profile with `enabled && preload && path !== ""`. A busy voice is never converted into a preload voice mid-playback. Changed definitions reconfigure the retained voice in place.
+
+Voices whose sound vanished, was disabled, or lost its path are marked `stale`: loop voices stop immediately (`loopStopped` + destroy), idle one-shots are destroyed, and busy one-shots finish before their timer fires.
+
+Voices that are still valid but no longer desired (or whose `preload` flipped to `false`) get `keepLoaded = false` and a release-timer restart — the normal one-second lazy lifecycle takes over instead of an immediate destroy.
+
+Every reconcile ends with `configurationChanged()`, including the profile-disabled teardown path.
+
+---
+
+## 6.10 Profile management internals
+
+```text
+createProfile(name, data)
+    ├── clean name empty → false
+    ├── already exists → false
+    ├── data not a non-array object → false
+    └── Config.set("soundfx.profiles.<name>", data) → true
+
+getProfile(name)
+    ├── clean name empty → null
+    └── Config.get("soundfx.profiles.<name>", null)
+
+renameProfile(from, to)
+    ├── empty/same → false
+    ├── source missing → false
+    ├── destination exists → false
+    ├── source data null/undefined → false
+    ├── Config.set(<to>, data) + Config.remove(<from>)
+    ├── active was source → Config.set("soundfx.profile", destination)
+    └── true
+
+selectProfile(name)
+    ├── empty or unknown → false
+    ├── different from current → _stopAllVoices()
+    └── Config.set("soundfx.profile", name) → true
+
+removeProfile(name)
+    ├── empty / "default" / unknown → false
+    ├── was active → Config.set("soundfx.profile", "default") + _stopAllVoices()
+    └── Config.remove("soundfx.profiles.<name>") → true
+```
+
+Profile switching and active-profile removal use `_stopAllVoices()` (destroys every voice, clearing sources), while `stopAllLoops()` only stops loop voices and leaves one-shots and preloaded voices alone.
+
+---
+
+## 6.11 Master volume: no clamp by design
+
+```text
+setMasterVolume(value)
+    ├── Number(value) non-finite → false
+    └── Config.set("soundfx.masterVolume", volume) → true
+```
+
+The configured value is retained exactly so settings UI round-trips losslessly. The audible range is Qt `AudioOutput`'s concern. Reads (`masterVolume`, `getMasterVolume()`, `_masterVolume()`) return the stored number or `1.0` when missing/non-finite.
+
+---
+
+## 6.12 IPC architecture
+
+IPC is a thin external interface over the same service functions:
+
+```text
+terminal
+   │
+   ▼
+n0ctos-soundfx
+   │
+   ▼
+SoundFX.qml
+   │
+   ├── play/loop/stop/isLooping/stopAllLoops
+   ├── getSFX/setSFX/isSFXEnabled
+   ├── profiles + select/remove/rename
+   └── master volume
+   │
+   ▼
+Config + QtMultimedia
+```
+
+Value-returning reads that produce objects (`getStatus`, `getSFX`, `getProfile`) return `JSON.stringify()`-ed strings; missing values stringify to `"null"`. Boolean actions return the same `bool` the QML function returns. `setSFX` / `createProfile` `JSON.parse()` their `<json>` argument and return `false` with a warning on invalid JSON. Structured targets are accepted as JSON objects for `getSFX` / `setSFX` / `isEnabled`.
+
+---
+
+## 6.13 Final architecture summary
+
+The entire system can be viewed as:
+
+```text
+                         Component
+                            │
+                            │ play / loop / getSFX / profiles
+                            ▼
+                    ┌─────────────────┐
+                    │     SoundFX     │
+                    │                 │
+                    │ targets         │
+                    │ profiles        │
+                    │ voices          │
+                    │ reconcile       │
+                    └────────┬────────┘
+                             │
+              ┌──────────────┼──────────────┐
+              │              │              │
+              ▼              ▼              ▼
+           Config      MediaPlayer     AudioOutput
+              │         + releaseTimer   volume = s*v
+              ▼
+         homeConfig
+         soundfx.*
+```
+
+The core rule is:
+
+> **Components request what sound they need; `SoundFX.qml` decides which profile definition it comes from and which voice plays it; QtMultimedia handles how the audio is decoded and output.**

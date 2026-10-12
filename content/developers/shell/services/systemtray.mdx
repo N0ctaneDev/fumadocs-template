@@ -1,0 +1,1309 @@
+---
+title: "SystemTray Service"
+description: "SystemTray.qml is N0ctOS's centralized StatusNotifier / system-tray service."
+---
+
+`SystemTray.qml` is N0ctOS's centralized StatusNotifier / system-tray service.
+
+It gives every shell component one consistent place to list tray items, separate pinned from hidden icons, track attention state, trigger item actions, and open the single service-owned tray menu without touching Quickshell's native `SystemTray` model or configuration files directly.
+
+The service supports native item adaptation, a pinned-is-not-hidden visibility model, hidden-id persistence, attention tracking, exact-id lookup, activation/secondary-activation/scroll/launch, one-at-a-time tray menus via the N0ctOS `ContextMenu`, and a full IPC interface.
+
+The normal usage pattern is:
+
+```text
+Component
+    │
+    ▼
+SystemTray
+    │
+    ├── items / pinnedItems / hiddenItems / attentionItems
+    ├── counts + hasAttention + menu state
+    ├── pin / hide / activate / scroll / launch
+    └── openMenu / closeMenu
+    │
+    ▼
+QsTray.SystemTray + Config + ContextMenu
+    │
+    ├── native items (live ObjectModel)
+    ├── homeConfig (systemTray.hidden)
+    └── one custom menu window
+```
+
+---
+
+# 1. What does it do?
+
+`SystemTray.qml` adapts Quickshell's native tray items into N0ctOS wrapper objects with stable display, status, capability, and visibility state.
+
+A component can list visible icons:
+
+```qml
+SystemTray.pinnedItems
+```
+
+or hidden ones:
+
+```qml
+SystemTray.hiddenItems
+```
+
+or trigger an action:
+
+```qml
+SystemTray.activate(item.id)
+```
+
+```qml
+SystemTray.openMenu(item.id)
+```
+
+The expected configuration is:
+
+```json
+{
+    "systemTray": {
+        "hidden": []
+    }
+}
+```
+
+Only `hidden` is owned by this service. Unknown keys inside `systemTray` are preserved on write.
+
+The visibility model is deliberately simple:
+
+```text
+pinned = NOT in hidden[]
+hidden = in hidden[]
+```
+
+So a component can simply do:
+
+```qml
+Repeater {
+    model: SystemTray.pinnedItems
+}
+```
+
+and not care how native items are discovered, how hidden ids are stored, or how menus are opened.
+
+When no tray host items are connected, `count` is `0` and every list is empty. Hidden ids for disconnected items are still remembered in config.
+
+---
+
+# 2. UI API
+
+Import normally:
+
+```qml
+import QtQuick
+import Quickshell
+
+import qs.services
+```
+
+## Core API
+
+| How to call | What does it do |
+| --- | --- |
+| `SystemTray.isReady` | Whether `Config.isReady`. Guards config sync. |
+| `SystemTray.count` | Number of connected items (`_items.length`). |
+| `SystemTray.items` | All connected N0ctOS adapter objects (native/discovery order). |
+| `SystemTray.pinnedItems` | Connected items not in `hidden[]` (native order preserved). |
+| `SystemTray.hiddenItems` | Connected items in `hidden[]`. |
+| `SystemTray.pinnedCount` | `pinnedItems.length`. |
+| `SystemTray.hiddenCount` | `hiddenItems.length`. |
+| `SystemTray.attentionItems` | Connected items in `NeedsAttention` state. |
+| `SystemTray.hasAttention` | `attentionItems.length > 0`. |
+| `SystemTray.isMenuOpen` | `menuBackend !== "none"`. Exactly one tray menu may be active. |
+| `SystemTray.menuItemId` | Id of the item whose menu is open, else `""`. |
+| `SystemTray.menuBackend` | `"none"`, `"pending"`, or `"custom"` (see menu states). |
+| `SystemTray.syncFromConfig()` | Reloads `systemTray.hidden` from Config, normalizes it (stringified, deduplicated, blanks dropped), and reschedules a model sync. No-op before `Config.isReady` or when unchanged. |
+| `SystemTray.find(id)` | Returns the adapter with an exact string-id match, else `null`. Returns `null` for empty ids. |
+| `SystemTray.pin(id)` | Removes the id from `hidden[]` (makes it visible). Persists via `Config.set("systemTray", ...)`. |
+| `SystemTray.unpin(id)` | Adds the id to `hidden[]` (moves it to the hidden set). Persists. |
+| `SystemTray.togglePin(id)` | Finds the item first (`false` when unknown), then `unpin()` when pinned, else `pin()`. |
+| `SystemTray.hide(id)` | Adds the id to `hidden[]`. Same storage as `unpin()`. |
+| `SystemTray.show(id)` | Removes the id from `hidden[]`. Same storage as `pin()`. |
+| `SystemTray.toggleHidden(id)` | Finds the item first (`false` when unknown), then `show()` when hidden, else `hide()`. |
+| `SystemTray.activate(id)` | Calls the native `activate()` when `hasActivate`. Returns `false` for unknown items, missing capability, missing native, or exceptions. |
+| `SystemTray.secondaryActivate(id)` | Calls the native `secondaryActivate()` when `hasSecondaryActivate`. Same failure rules. |
+| `SystemTray.scroll(id, delta, horizontal)` | Calls the native `scroll(Number(delta), Boolean(horizontal))` when `hasScroll`. Same failure rules. |
+| `SystemTray.launch(id)` | Tries an exact `DesktopEntries.byId(item.id)` lookup and `execute()` first; falls back to `activate()`. Returns `false` for unknown items. |
+| `SystemTray.openMenu(id)` | Opens the single service-owned menu for the item. Returns `false` for unknown items or items without a menu, or when `ContextMenu` rejects the request. |
+| `SystemTray.closeMenu()` | Closes any open tray menu (both `pending` and `custom` backends). Emits `menuClosed(id)` when a menu was open. |
+
+| Example | Result |
+| --- | --- |
+| `SystemTray.find("nm-applet")` | adapter object, or `null` |
+| `SystemTray.pin("nm-applet")` | `true`, id removed from `hidden[]` |
+| `SystemTray.unpin("nm-applet")` | `true`, id added to `hidden[]` |
+| `SystemTray.togglePin("nm-applet")` | `true`, visibility flips (`false` when unknown) |
+| `SystemTray.hide("nm-applet")` | `true`, id hidden |
+| `SystemTray.show("nm-applet")` | `true`, id shown |
+| `SystemTray.toggleHidden("nm-applet")` | `true`, hidden state flips (`false` when unknown) |
+| `SystemTray.activate("nm-applet")` | `true` when native activation ran |
+| `SystemTray.secondaryActivate("nm-applet")` | `true` when native secondary activation ran |
+| `SystemTray.scroll("nm-applet", 120, false)` | `true` when native scroll ran |
+| `SystemTray.launch("nm-applet")` | `true` via desktop entry or activation fallback |
+| `SystemTray.openMenu("nm-applet")` | `true`, menu opens (`false` when no menu) |
+| `SystemTray.closeMenu()` | menu closes, `menuClosed(id)` emitted when one was open |
+
+## Adapter snapshot shape
+
+Every element of `items` / `pinnedItems` / `hiddenItems` / `attentionItems` is an N0ctOS adapter (not the raw native item). IPC `_snapshot()` exposes the same fields as JSON:
+
+| Field | Meaning |
+| --- | --- |
+| `id` | `String(native.id \|\| "")`. |
+| `title` | `String(native.title \|\| "")`. |
+| `icon` | `String(native.icon \|\| "")`. |
+| `tooltip` | Combined `tooltipTitle + "\n" + tooltipDescription` (either part alone when only one exists). |
+| `tooltipTitle` / `tooltipDescription` | Raw native tooltip parts. |
+| `status` | `"attention"`, `"active"`, or `"passive"`. |
+| `statusCode` | Numeric native status (`NeedsAttention` / `Active` / `Passive`). |
+| `isActive` / `isPassive` / `isAttention` | Status predicates. |
+| `isPinned` | `!isHidden`. |
+| `isHidden` | Whether the id is in `hidden[]`. |
+| `hasMenu` | Whether the native item reports a menu. |
+| `hasActivate` | Native `activate` is a function and the item is not `onlyMenu`. |
+| `hasSecondaryActivate` | Native `secondaryActivate` is a function. |
+| `hasScroll` | Native `scroll` is a function. |
+| `onlyMenu` | Native `onlyMenu` flag. |
+| `category` | `"communications"`, `"hardware"`, `"system-services"`, or `"application-status"` (fallback). |
+
+Adapters also expose convenience methods that forward to the service with their own id:
+
+```qml
+item.activate()
+item.secondaryActivate()
+item.scroll(delta, horizontal)
+item.openMenu()
+item.pin()
+item.unpin()
+item.hide()
+item.show()
+item.togglePin()
+item.toggleHidden()
+item.launch()
+```
+
+## Signals
+
+| How to listen | What does it do |
+| --- | --- |
+| `itemAdded(id)` | Emitted when the native `Instantiator` reports an added object with an id. |
+| `itemRemoved(id)` | Emitted when the native `Instantiator` reports a removed object with an id. The open menu for that adapter is closed first. |
+| `itemChanged(id)` | Emitted when a native property watcher fires (icon, title, tooltip parts, status, category, menu, `hasMenu`, `onlyMenu`). Also when `hasMenu` is lost while that item's menu is open, the menu closes. |
+| `attentionChanged()` | Emitted after every `_syncModels()` and every `_refreshAttention()` pass. |
+| `configurationChanged()` | Emitted when `hidden[]` actually changes (config sync or persisted hide/show). |
+| `menuOpened(id)` | Emitted when `openMenu()` reaches the `"custom"` backend. |
+| `menuClosed(id)` | Emitted by `closeMenu()` and by the internal `_clearMenuState(true)` path when a menu was open. |
+
+### Typical component usage
+
+```qml
+Row {
+    spacing: 4
+
+    Repeater {
+        model: SystemTray.pinnedItems
+
+        delegate: Image {
+            required property var modelData
+
+            source: modelData.icon
+            width: 22
+            height: 22
+
+            MouseArea {
+                anchors.fill: parent
+                acceptedButtons: Qt.LeftButton | Qt.RightButton
+
+                onClicked: (mouse) => {
+                    if (mouse.button === Qt.RightButton
+                        && modelData.hasMenu) {
+                        modelData.openMenu()
+                    } else {
+                        modelData.activate()
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+An attention indicator:
+
+```qml
+Text {
+    visible: SystemTray.hasAttention
+    text: "●"
+}
+```
+
+A hidden-items expander:
+
+```qml
+Repeater {
+    model: SystemTray.hiddenItems
+
+    delegate: Image {
+        required property var modelData
+
+        source: modelData.icon
+
+        MouseArea {
+            anchors.fill: parent
+
+            onClicked:
+                modelData.show()
+        }
+    }
+}
+```
+
+That is the intended everyday usage.
+
+Components normally should not need to know how native items, hidden-id storage, attention derivation, or `ContextMenu` ownership work.
+
+---
+
+# 3. IPC API
+
+IPC target:
+
+```text
+n0ctos-tray
+```
+
+## Global state
+
+| How to call | What does it do |
+| --- | --- |
+| `getStatus` | Returns `{count, pinnedCount, hiddenCount, attentionCount, hasAttention, menuOpen, menuBackend, menuItemId}` as JSON. |
+| `count` | Returns the connected item count. |
+
+| Example | Result |
+| --- | --- |
+| `qs ipc call n0ctos-tray getStatus` | JSON status object (see below) |
+| `qs ipc call n0ctos-tray count` | e.g. `3` |
+
+```bash
+qs ipc call n0ctos-tray getStatus
+```
+
+returns e.g.:
+
+```json
+{
+    "count": 3,
+    "pinnedCount": 2,
+    "hiddenCount": 1,
+    "attentionCount": 0,
+    "hasAttention": false,
+    "menuOpen": false,
+    "menuBackend": "none",
+    "menuItemId": ""
+}
+```
+
+## Listing operations
+
+| How to call | What does it do |
+| --- | --- |
+| `list` | Returns a JSON array of `_snapshot()` for every connected item. |
+| `pinned` | Returns a JSON array of `_snapshot()` for pinned (visible) items. |
+| `hidden` | Returns `{items: [...connected hidden snapshots...], rememberedIds: [...all hidden ids...]}` as JSON. `rememberedIds` includes ids with no connected item. |
+| `attention` | Returns a JSON array of `_snapshot()` for attention items. |
+| `get <id>` | Returns `_snapshot()` for one item as JSON, or `""` when unknown. |
+
+| Example | Result |
+| --- | --- |
+| `qs ipc call n0ctos-tray list` | JSON array of all item snapshots |
+| `qs ipc call n0ctos-tray pinned` | JSON array of visible item snapshots |
+| `qs ipc call n0ctos-tray hidden` | `{"items":[...],"rememberedIds":[...]}` |
+| `qs ipc call n0ctos-tray attention` | JSON array (empty when nothing needs attention) |
+| `qs ipc call n0ctos-tray get nm-applet` | one snapshot object, or `""` |
+
+```bash
+qs ipc call n0ctos-tray list
+```
+
+```bash
+qs ipc call n0ctos-tray hidden
+```
+
+```bash
+qs ipc call n0ctos-tray get nm-applet
+```
+
+One snapshot looks like:
+
+```json
+{
+    "id": "nm-applet",
+    "title": "Network",
+    "icon": "network-wireless",
+    "tooltip": "Connected\nMyWifi",
+    "tooltipTitle": "Connected",
+    "tooltipDescription": "MyWifi",
+    "status": "active",
+    "statusCode": 1,
+    "isActive": true,
+    "isPassive": false,
+    "isAttention": false,
+    "isPinned": true,
+    "isHidden": false,
+    "hasMenu": true,
+    "hasActivate": true,
+    "hasSecondaryActivate": true,
+    "hasScroll": false,
+    "onlyMenu": false,
+    "category": "system-services"
+}
+```
+
+## Visibility operations
+
+| How to call | What does it do |
+| --- | --- |
+| `pin <id>` | Removes the id from `hidden[]`. |
+| `unpin <id>` | Adds the id to `hidden[]`. |
+| `togglePin <id>` | Flips pin state (`false` when the item is unknown). |
+| `hide <id>` | Adds the id to `hidden[]`. |
+| `show <id>` | Removes the id from `hidden[]`. |
+| `toggleHidden <id>` | Flips hidden state (`false` when the item is unknown). |
+
+| Example | Result |
+| --- | --- |
+| `qs ipc call n0ctos-tray pin nm-applet` | `true`, item becomes visible |
+| `qs ipc call n0ctos-tray unpin nm-applet` | `true`, item becomes hidden |
+| `qs ipc call n0ctos-tray togglePin nm-applet` | `true`, state flips |
+| `qs ipc call n0ctos-tray hide nm-applet` | `true`, item becomes hidden |
+| `qs ipc call n0ctos-tray show nm-applet` | `true`, item becomes visible |
+| `qs ipc call n0ctos-tray toggleHidden nm-applet` | `true`, state flips |
+
+```bash
+qs ipc call n0ctos-tray hide nm-applet
+```
+
+```bash
+qs ipc call n0ctos-tray show nm-applet
+```
+
+`pin`/`show` and `unpin`/`hide` share one storage. `togglePin`/`toggleHidden` additionally require the item to be connected (they `find()` first).
+
+## Action operations
+
+| How to call | What does it do |
+| --- | --- |
+| `activate <id>` | Runs native activation when `hasActivate`. |
+| `secondaryActivate <id>` | Runs native secondary activation when `hasSecondaryActivate`. |
+| `scroll <id> <delta> <horizontal>` | Runs native scroll with numeric delta and boolean horizontal when `hasScroll`. |
+| `launch <id>` | Desktop-entry `execute()` first, native activation fallback. |
+
+| Example | Result |
+| --- | --- |
+| `qs ipc call n0ctos-tray activate nm-applet` | `true` when activation ran |
+| `qs ipc call n0ctos-tray secondaryActivate nm-applet` | `true` when secondary activation ran |
+| `qs ipc call n0ctos-tray scroll nm-applet 120 false` | `true` when scroll ran |
+| `qs ipc call n0ctos-tray launch nm-applet` | `true` via desktop entry or activation |
+
+```bash
+qs ipc call n0ctos-tray activate nm-applet
+```
+
+```bash
+qs ipc call n0ctos-tray launch nm-applet
+```
+
+```bash
+qs ipc call n0ctos-tray scroll nm-applet 120 false
+```
+
+## Menu operations
+
+| How to call | What does it do |
+| --- | --- |
+| `openMenu <id>` | Opens the service-owned menu for the item. Returns `false` for unknown items or items without a menu. |
+| `closeMenu` | Closes any open tray menu. Returns nothing (`void`). |
+
+| Example | Result |
+| --- | --- |
+| `qs ipc call n0ctos-tray openMenu nm-applet` | `true`, menu opens |
+| `qs ipc call n0ctos-tray closeMenu` | menu closes |
+
+```bash
+qs ipc call n0ctos-tray openMenu nm-applet
+```
+
+```bash
+qs ipc call n0ctos-tray closeMenu
+```
+
+## Maintenance
+
+| How to call | What does it do |
+| --- | --- |
+| `refresh` | Runs `_syncModels()` synchronously (rebuilds `items`/`pinned`/`hidden`/`attention` from the native instantiator). Returns nothing (`void`). |
+
+| Example | Result |
+| --- | --- |
+| `qs ipc call n0ctos-tray refresh` | models rebuilt immediately |
+
+```bash
+qs ipc call n0ctos-tray refresh
+```
+
+Normal model updates go through the debounced `_scheduleModelSync()` (`Qt.callLater`) path. `refresh` is the only synchronous bypass, intended for tests and debugging.
+
+---
+
+# 4. Features / limitations
+
+## Features
+
+### Single entry point for tray state
+
+All tray reads and actions go through:
+
+```text
+SystemTray.qml
+```
+
+instead of each panel, tooltip, or keybinding touching:
+
+```text
+QsTray.SystemTray.items
+```
+
+directly.
+
+### Adapter layer over native items
+
+Quickshell's `SystemTray.items` is a live `ObjectModel`. Each native item receives exactly one N0ctOS adapter via a non-asynchronous `Instantiator`:
+
+```text
+QsTray.SystemTray.items (native)
+    │
+    ▼
+nativeItemInstantiator (one adapter per native item)
+    │
+    ▼
+N0ctOS adapters (stable id/title/icon/status/visibility/capabilities)
+    │
+    ├── _items (all)
+    ├── _pinnedItems (not hidden)
+    ├── _hiddenItems (hidden)
+    └── _attentionItems (NeedsAttention)
+```
+
+UI code binds to adapters, never to native items. The native object stays reachable as `adapter._nativeItem` for actions only.
+
+### Pinned-means-not-hidden model
+
+There is no separate pinned list in config:
+
+```text
+hidden[] = ["vlc", "discord"]
+    ├── "vlc" connected → hiddenItems
+    ├── "discord" disconnected → remembered only
+    └── everything else connected → pinnedItems
+```
+
+`isPinned` is defined as:
+
+```qml
+!isHidden
+```
+
+and `isHidden` is a membership test against `_hiddenIds`. `pin()`/`show()` remove the id; `unpin()`/`hide()` add it. `togglePin()` and `toggleHidden()` are the same storage with opposite polarity plus a `find()` existence check.
+
+### Hidden-id persistence
+
+The service owns `systemTray.hidden` and nothing else in that section:
+
+```text
+syncFromConfig()
+    Config.get("systemTray", {})
+        ├── hidden array → normalize (String, dedupe, drop "")
+        └── missing/invalid → []
+
+_saveHiddenIds(ids)
+    nextSection = {..._configSection, hidden: ids.slice()}
+    Config.set("systemTray", nextSection)
+```
+
+Unknown keys in `systemTray` are copied through on write, so other services can share the section without being clobbered.
+
+`syncFromConfig()` runs on startup, on `Config.onExternalReload`, on `Config.on_ConfigRevisionChanged` (when ready), and on `isReady` transitions. It emits `configurationChanged()` and schedules a model sync only when the normalized list actually changed (JSON comparison).
+
+### Debounced model sync with a synchronous escape hatch
+
+Native add/remove and config changes never rebuild models inline:
+
+```text
+native add/remove / hidden[] change / id change
+    │
+    ▼
+_scheduleModelSync()
+    ├── already scheduled → ignore
+    └── else Qt.callLater(_syncModels)
+```
+
+`refresh` IPC calls `_syncModels()` directly instead of scheduling. This is the `refresh → _syncModels` nuance: every other path is coalesced through `Qt.callLater`, while `refresh` rebuilds synchronously for tests and debugging.
+
+`_syncModels()` walks the instantiator (`objectAt(i)`), partitions into pinned/hidden by `isHidden`, collects attention by `isAttention`, replaces all four arrays at once, and emits `attentionChanged()`.
+
+### Attention tracking
+
+Attention is derived, not stored:
+
+```text
+native status === NeedsAttention → adapter.isAttention
+    → _attentionItems → hasAttention
+```
+
+`_refreshAttention()` recomputes from the current `_items` without rewalking the instantiator and is called on every native `onStatusChanged`. Full `_syncModels()` recomputes it as well.
+
+### Capability-gated actions
+
+Every action checks its capability first:
+
+```text
+activate()          → hasActivate (function + !onlyMenu)
+secondaryActivate() → hasSecondaryActivate (function)
+scroll()            → hasScroll (function)
+openMenu()          → hasMenu
+launch()            → DesktopEntries.byId(id).execute, else activate()
+```
+
+Failures warn (`[SystemTray] activate failed:` etc.) and return `false`. Native calls are wrapped in `try/catch` so a misbehaving item cannot break the shell.
+
+### Launch prefers desktop entries
+
+`launch()` tries an exact desktop-entry lookup first:
+
+```text
+DesktopEntries.byId(item.id)
+    ├── found + execute() works → true
+    └── missing/throws → activate(item.id)
+```
+
+When the tray id does not correspond to a desktop entry, launch degrades to a normal activation instead of failing.
+
+### Single-menu backend states
+
+Exactly one tray menu may be active. The backend cycles:
+
+```text
+none
+    → openMenu() → pending
+        ├── ContextMenu.open ok + menuOpen → custom + menuOpened(id)
+        └── rejected/throws → none (no signal)
+
+custom
+    → closeMenu() → none + menuClosed(id)
+    → ContextMenu closes itself → _clearMenuState(true) → none + menuClosed(id)
+    → item removed / id changed / hasMenu lost → closeMenu()
+```
+
+`isMenuOpen` is `backend !== "none"`, so both `pending` and `custom` read as open. `closeMenu()` clears service state *before* calling `ContextMenu.close()` so the context menu's own close notification does not emit a second `menuClosed`. `_clearMenuState()` is the self-close path: it clears state without calling `close()` again.
+
+The visible menu content is fully service-owned: native `QsMenuEntry` trees become `ContextMenuObj` rows (with checkbox/radio glyphs, separators, and recursive submenus), plus a trailing Hide/Show row for the active item. Developers never provide tray menu content.
+
+### Async DBus menu loading
+
+DBus menus arrive over several round trips. Both the root menu and each submenu poll briefly:
+
+```text
+menu opens (possibly empty)
+    → refreshTimer (100 ms, up to 8 attempts)
+        → ContextMenu.refresh()
+        → children arrived? stop : retry
+```
+
+Slow applications therefore fill in instead of staying empty. Lazily populated submenus that only send children after `AboutToShow` cannot load through QML (no invokable exposed by Quickshell) and stay empty by platform design.
+
+### Reactive configuration
+
+`_hiddenIds` follows the config file without polling:
+
+```text
+config file changes
+    │
+    ▼
+Config external reload / revision change
+    │
+    ▼
+syncFromConfig()
+    │
+    ▼
+_hiddenIds + _configSection update
+    │
+    ▼
+_scheduleModelSync()
+    │
+    ▼
+adapters reevaluate isHidden/isPinned
+```
+
+Adapter `isHidden` reads `_hiddenIds` live, so persisting a hide/show immediately re-partitions on the next sync.
+
+### JSON serialization for IPC
+
+`_snapshot()` converts a live adapter into plain data (id, title, icon, tooltip parts, status, flags, capabilities, category). It intentionally omits the native object and live bindings so the result is JSON-safe for `list` / `pinned` / `hidden` / `attention` / `get` and for external scripts.
+
+---
+
+## Limitations
+
+### No hidden-id validation against connected items
+
+`hidden[]` may contain ids with no connected item. They are remembered (`rememberedIds` in the `hidden` IPC) and take effect if the application appears later. There is no garbage collection of stale ids.
+
+### `togglePin()` / `toggleHidden()` require a connected item
+
+Direct `pin()` / `unpin()` / `hide()` / `show()` operate on raw ids and always persist. The toggle variants `find()` first:
+
+```qml
+SystemTray.togglePin("not-connected") // false, nothing persisted
+SystemTray.hide("not-connected")      // true, id remembered
+```
+
+Scripts that manage not-yet-running applications must use the non-toggle forms.
+
+### `find()` is an exact string match
+
+```qml
+SystemTray.find("nm-applet") // adapter or null
+```
+
+There is no substring, case-insensitive, or category search. The id is `String(native.id || "")`, so empty-id natives are invisible to lookup.
+
+### Actions need the item to be connected
+
+Every action resolves through `find()`. A remembered-but-disconnected hidden id cannot be activated, scrolled, launched, or menu-opened — `false` is returned.
+
+### `onlyMenu` items cannot be activated
+
+`hasActivate` is `false` when the native item reports `onlyMenu`, even when a native `activate` function exists. Such items are menu-only by protocol; use `openMenu()`.
+
+### Menus need `hasMenu`
+
+`openMenu()` rejects items without a native menu:
+
+```text
+unknown id → warn + false
+!hasMenu   → warn + false
+ContextMenu rejected → warn + state cleared + false
+```
+
+The service does not synthesize a fallback menu for menuless icons.
+
+### Only one menu at a time
+
+`openMenu()` calls `closeMenu()` first. Opening a second item's menu closes the first (emitting `menuClosed` for it) before attempting the new one.
+
+### `closeMenu()` is `void`
+
+Unlike the boolean actions, `closeMenu()` (QML and IPC) returns nothing. Whether a menu was open is observable through `menuClosed(id)` and `isMenuOpen`, not a return value.
+
+### Scroll arguments are coerced, not validated
+
+```qml
+SystemTray.scroll(id, delta, horizontal)
+```
+
+passes `Number(delta)` and `Boolean(horizontal)` straight to the native call. Non-numeric deltas become `NaN` at the native layer; the service does not range-check scroll steps.
+
+### Category mapping is lossy
+
+Native categories collapse to four strings:
+
+```text
+Communications → "communications"
+Hardware       → "hardware"
+SystemServices → "system-services"
+anything else  → "application-status"
+```
+
+The raw numeric category is not exposed.
+
+---
+
+# 5. Example use cases
+
+## 5.1 A pinned tray row
+
+The standard panel pattern — visible icons only, left click activates, right click opens the menu:
+
+```qml
+import QtQuick
+import Quickshell
+
+import qs.services
+
+Row {
+    spacing: 4
+
+    Repeater {
+        model: SystemTray.pinnedItems
+
+        delegate: Image {
+            required property var modelData
+
+            source: modelData.icon
+            width: 22
+            height: 22
+
+            MouseArea {
+                anchors.fill: parent
+                acceptedButtons: Qt.LeftButton | Qt.RightButton
+
+                onClicked: (mouse) => {
+                    if (mouse.button === Qt.RightButton
+                        && modelData.hasMenu) {
+                        modelData.openMenu()
+                    } else {
+                        modelData.activate()
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+The row never touches native items or hidden-id storage.
+
+---
+
+## 5.2 A hidden-items expander
+
+Show overflow icons on demand:
+
+```qml
+Column {
+    visible: SystemTray.hiddenCount > 0
+
+    Text {
+        text: "Hidden (" + SystemTray.hiddenCount + ")"
+    }
+
+    Row {
+        Repeater {
+            model: SystemTray.hiddenItems
+
+            delegate: Image {
+                required property var modelData
+
+                source: modelData.icon
+                width: 22
+                height: 22
+
+                MouseArea {
+                    anchors.fill: parent
+
+                    onClicked:
+                        modelData.show()
+                }
+            }
+        }
+    }
+}
+```
+
+Hiding from the expander is symmetric:
+
+```qml
+modelData.hide()
+```
+
+---
+
+## 5.3 Attention indicator
+
+Blink or badge when anything needs attention:
+
+```qml
+import QtQuick
+
+import qs.services
+
+Text {
+    visible: SystemTray.hasAttention
+    text: "●"
+
+    Repeater {
+        model: SystemTray.attentionItems
+
+        delegate: Text {
+            required property var modelData
+
+            text: modelData.title || modelData.id
+        }
+    }
+}
+```
+
+For imperative reactions (notifications, sounds):
+
+```qml
+Connections {
+    target: SystemTray
+
+    function onAttentionChanged() {
+        console.log(
+            "Attention:",
+            SystemTray.hasAttention
+        )
+    }
+}
+```
+
+---
+
+## 5.4 Pin and hide controls
+
+Per-icon context actions (e.g. inside a tooltip or management view):
+
+```qml
+Row {
+    spacing: 8
+
+    Button {
+        text: item.isPinned ? "Hide" : "Show"
+
+        onClicked:
+            item.toggleHidden()
+    }
+
+    Button {
+        text: "Activate"
+
+        enabled: item.hasActivate
+
+        onClicked:
+            item.activate()
+    }
+
+    Button {
+        text: "Menu"
+
+        enabled: item.hasMenu
+
+        onClicked:
+            item.openMenu()
+    }
+}
+```
+
+Persist directly by id when no adapter is at hand:
+
+```qml
+SystemTray.hide("discord")
+SystemTray.show("discord")
+SystemTray.togglePin("discord")
+```
+
+---
+
+## 5.5 Launching an application from the tray
+
+Prefer the desktop entry, fall back to activation automatically:
+
+```qml
+SystemTray.launch(item.id)
+```
+
+From IPC:
+
+```bash
+qs ipc call n0ctos-tray launch nm-applet
+```
+
+When the tray id matches a desktop entry id, the full application launches; otherwise the click-equivalent activation runs.
+
+---
+
+## 5.6 Reacting to tray changes
+
+Use the signals for dynamic UI or logging:
+
+```qml
+Connections {
+    target: SystemTray
+
+    function onItemAdded(id) {
+        console.log("Tray added:", id)
+    }
+
+    function onItemRemoved(id) {
+        console.log("Tray removed:", id)
+    }
+
+    function onItemChanged(id) {
+        console.log("Tray changed:", id)
+    }
+
+    function onMenuOpened(id) {
+        console.log("Menu opened:", id)
+    }
+
+    function onMenuClosed(id) {
+        console.log("Menu closed:", id)
+    }
+}
+```
+
+`_syncModels()`-driven bindings (counts, lists) do not need these signals — they update through the array properties.
+
+---
+
+## 5.7 Terminal workflow
+
+Check state:
+
+```bash
+qs ipc call n0ctos-tray getStatus
+qs ipc call n0ctos-tray count
+```
+
+List items:
+
+```bash
+qs ipc call n0ctos-tray list
+qs ipc call n0ctos-tray pinned
+qs ipc call n0ctos-tray hidden
+qs ipc call n0ctos-tray attention
+qs ipc call n0ctos-tray get nm-applet
+```
+
+Manage visibility:
+
+```bash
+qs ipc call n0ctos-tray hide nm-applet
+qs ipc call n0ctos-tray show nm-applet
+qs ipc call n0ctos-tray toggleHidden nm-applet
+```
+
+Act on items:
+
+```bash
+qs ipc call n0ctos-tray activate nm-applet
+qs ipc call n0ctos-tray secondaryActivate nm-applet
+qs ipc call n0ctos-tray scroll nm-applet 120 false
+qs ipc call n0ctos-tray launch nm-applet
+```
+
+Manage menus and force a synchronous resync:
+
+```bash
+qs ipc call n0ctos-tray openMenu nm-applet
+qs ipc call n0ctos-tray closeMenu
+qs ipc call n0ctos-tray refresh
+```
+
+---
+
+# 6. Detailed architecture
+
+This section is for developers working on `SystemTray.qml` and the services/components that consume it.
+
+---
+
+## 6.1 Overall architecture
+
+The service is a reactive adapter over the native tray model with a small Config-backed visibility layer and a service-owned menu:
+
+```text
+N0ctOS Component / Service
+            │
+            ▼
+       SystemTray.qml
+            │
+     ┌──────┼──────────┐
+     │      │          │
+     ▼      ▼          ▼
+ Adapters Visibility  Menu
+     │      │          │
+     ▼      ▼          ▼
+ QsTray  Config   ContextMenu
+  items   hidden[]  custom menu
+```
+
+There are effectively three responsibilities:
+
+```text
+SystemTray
+    adaptation, visibility, actions, single menu
+
+QsTray.SystemTray (Quickshell)
+    live native item discovery and DBus menus
+
+Config
+    hidden-id persistence and reactivity
+
+ContextMenu (N0ctOS)
+    actual menu window, positioning, interaction
+```
+
+SystemTray should not duplicate functionality already provided by the native tray model, Config, or ContextMenu.
+
+---
+
+## 6.2 Configuration structure
+
+The service owns the `systemTray` section's `hidden` key in `homeConfig`.
+
+The structure is:
+
+```json
+{
+    "systemTray": {
+        "hidden": []
+    }
+}
+```
+
+A real configuration might look like:
+
+```json
+{
+    "systemTray": {
+        "hidden": [
+            "discord",
+            "vlc"
+        ]
+    }
+}
+```
+
+`_hiddenIds` is the normalized in-memory copy (stringified, deduplicated, blanks dropped). `_configSection` is the last-seen full `systemTray` object so writes preserve unknown keys.
+
+Everything else (connected items, statuses, menus) is live native state, not stored configuration.
+
+---
+
+## 6.3 Adapter creation
+
+The `Instantiator` mirrors the native model one-to-one:
+
+```text
+QsTray.SystemTray.items[i] → adapter[i]
+```
+
+Adapters are lightweight `Item`s (invisible, zero-size) exposing derived state. Native property watchers (`Connections` on `adapter._nativeItem`) translate native changes into `itemChanged(id)` plus attention refreshes and menu invalidation:
+
+```text
+native onIcon/onTitle/onTooltip*/onCategory/onMenu/onOnlyMenu
+    → itemChanged(id)
+
+native onStatusChanged
+    → _refreshAttention() + itemChanged(id)
+
+native onHasMenuChanged (menu lost while open)
+    → itemChanged(id) + closeMenu()
+
+native onIdChanged
+    → closeMenu when active + _scheduleModelSync()
+```
+
+`onObjectAdded` schedules a sync and emits `itemAdded(id)`; `onObjectRemoved` closes the active menu when needed, schedules a sync, and emits `itemRemoved(id)`.
+
+---
+
+## 6.4 Model synchronization
+
+`_syncModels()` is the only place the four public arrays are replaced:
+
+```text
+_syncModels()
+    all = [instantiator.objectAt(i) for each i, skipping null]
+    pinned = all where !isHidden
+    hidden = all where isHidden
+    attention = all where isAttention
+    _items/_pinnedItems/_hiddenItems/_attentionItems = rebuilt arrays
+    attentionChanged()
+```
+
+All callers except `refresh` IPC go through `_scheduleModelSync()`:
+
+```text
+_scheduleModelSync()
+    ├── _modelSyncScheduled → return (coalesce)
+    └── Qt.callLater(_syncModels + clear flag)
+```
+
+Rapid bursts (several native adds, a config sync, an id change) therefore collapse into one rebuild. `refresh` IPC bypasses the flag and calls `_syncModels()` synchronously — useful when a test or script needs the arrays to reflect the instantiator *now* rather than on the next event-loop turn.
+
+---
+
+## 6.5 Visibility write path
+
+```text
+pin(id) / show(id) → _setHidden(id, false)
+unpin(id) / hide(id) → _setHidden(id, true)
+
+_setHidden(id, hidden)
+    ├── empty id → false
+    ├── compute updated[] (+/- target)
+    ├── JSON equal to current → true (no write)
+    └── _saveHiddenIds(updated)
+            ├── !Config.isReady → false
+            ├── Config.set("systemTray", {...section, hidden})
+            │     └── false → false
+            ├── _configSection/_hiddenIds = persisted copy
+            ├── configurationChanged()
+            ├── _scheduleModelSync()
+            └── true
+```
+
+Identical writes are short-circuited before touching Config, so re-pinning an already-pinned id is a cheap `true`.
+
+---
+
+## 6.6 Lookup and capability checks
+
+`find(id)` linearly scans `_items` for an exact `item.id === String(id)` match. Empty ids return `null` immediately.
+
+Actions resolve through `find()` and then capability-gate:
+
+```text
+activate(id)
+    ├── find → null → false
+    ├── !hasActivate → false
+    ├── !native → false
+    └── try native.activate() → true / catch warn → false
+```
+
+`secondaryActivate()` and `scroll()` mirror this with their own capabilities. `launch()` inserts a desktop-entry attempt before the activation fallback.
+
+---
+
+## 6.7 Menu open/close internals
+
+`openMenu(id)`:
+
+```text
+find(id) → null → warn + false
+!hasMenu → warn + false
+closeMenu() (close any previous menu)
+_activeAdapter/_activeNativeItem = item
+_menuItemId = item.id, _menuBackend = "pending", _menuGeneration++
+ContextMenu.open(trayMenuComponent, WlrLayer.Overlay)
+    ├── throws → _clearMenuState(false) + false
+    ├── !menuOpen (rejected) → warn + _clearMenuState(false) + false
+    └── accepted → _menuBackend = "custom" + menuOpened(id) + true
+```
+
+`closeMenu()`:
+
+```text
+hadMenu = backend !== "none", closedId = _menuItemId, backend = _menuBackend
+_menuGeneration++
+_backend = "none", _menuItemId = "", adapters = null   (state first)
+backend custom/pending → ContextMenu.close() (may warn)
+hadMenu → menuClosed(closedId)
+```
+
+`_clearMenuState(emitClosed)` is the ContextMenu-self-close path (`onMenuOpenChanged` when backend is `"custom"` and `menuOpen` went false): same state clearing without calling `ContextMenu.close()`, emitting `menuClosed` only when requested and a menu was open.
+
+`_menuGeneration` invalidates stale asynchronous menu work defensively.
+
+---
+
+## 6.8 Menu content construction
+
+The service builds its menu from two `Component`s:
+
+```text
+trayMenuComponent (Column)
+    ├── QsMenuOpener (native menu → children, async DBus)
+    ├── Repeater over children → menuEntryComponent
+    ├── separator
+    └── Hide/Show ContextMenuObj (acts on _activeAdapter)
+
+menuEntryComponent (ContextMenuObj per QsMenuEntry)
+    ├── text/icon/enabled from native entry
+    ├── checkable glyphs via leadingContent (checkbox/radio states)
+    ├── closeOnClick false for parents and checkables
+    ├── functionAction → entry.triggered() for leaves
+    └── submenu → nested submenuComponent (recursive, same refresh pattern)
+```
+
+Both levels schedule `ContextMenu.refresh()` on children changes and poll up to 8 × 100 ms for late DBus arrivals so menus re-measure instead of staying incomplete.
+
+---
+
+## 6.9 Config reactivity
+
+```text
+Config.onExternalReload → syncFromConfig()
+Config.on_ConfigRevisionChanged (ready) → syncFromConfig()
+isReady → false→true → syncFromConfig() + _scheduleModelSync()
+```
+
+`syncFromConfig()` normalizes and JSON-compares before mutating, so unrelated config edits (another section changing revision) do not churn the tray.
+
+---
+
+## 6.10 IPC architecture
+
+IPC is a thin external interface over the same service functions:
+
+```text
+terminal
+   │
+   ▼
+n0ctos-tray
+   │
+   ▼
+SystemTray.qml
+   │
+   ├── find/pin/hide/activate/scroll/launch
+   ├── openMenu/closeMenu
+   └── _syncModels (refresh)
+   │
+   ▼
+QsTray + Config + ContextMenu
+```
+
+Listings (`list`/`pinned`/`hidden`/`attention`/`get`) return `JSON.stringify()`-ed `_snapshot()` data; `get` returns `""` for unknown ids. Boolean actions return the same `bool` the QML function returns. `closeMenu`/`refresh` are `void`.
+
+---
+
+## 6.11 Final architecture summary
+
+The entire system can be viewed as:
+
+```text
+                          Component
+                             │
+                             │ items / actions / menus
+                             ▼
+                     ┌─────────────────┐
+                     │   SystemTray    │
+                     │                 │
+                     │ adapters        │
+                     │ hidden[]        │
+                     │ attention       │
+                     │ single menu     │
+                     └────────┬────────┘
+                              │
+               ┌──────────────┼──────────────┐
+               │              │              │
+               ▼              ▼              ▼
+         ┌───────────┐  ┌───────────┐  ┌───────────┐
+         │  QsTray   │  │  Config   │  │ Context   │
+         │  native   │  │ hidden[]  │  │ Menu      │
+         │  items    │  │ (home)    │  │ (custom)  │
+         └───────────┘  └───────────┘  └───────────┘
+```
+
+The core rule is:
+
+> **Components request what tray state or action they need; `SystemTray.qml` decides which native item it maps to and whether it is visible, capable, or menu-bearing; the native tray, Config, and ContextMenu handle how items, persistence, and windows actually work.**

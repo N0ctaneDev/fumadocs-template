@@ -1,0 +1,26 @@
+{
+  "title": "Services",
+  "description": "Centralized QML services for the N0ctOS shell",
+  "icon": "Blocks",
+  "defaultOpen": true,
+  "pages": [
+    "index",
+    "animations",
+    "audio",
+    "battery",
+    "bluetooth",
+    "brightness",
+    "clipboard",
+    "config",
+    "configstore",
+    "datetime",
+    "media",
+    "network",
+    "notifications",
+    "power",
+    "screens",
+    "servicehost",
+    "soundfx",
+    "systemtray"
+  ]
+}

@@ -1,0 +1,28 @@
+---
+title: Services
+description: Centralized QML services for the N0ctOS shell — QML + IPC reference.
+---
+
+Every shell component talks to the same centralized services instead of touching backends directly. Each service below documents its QML API, IPC API, features, limitations, and architecture.
+
+## All services
+
+| Service | What it owns |
+| ------- | ------------ |
+| [Animations](./animations) | Animation profiles, overrides, and resolved config |
+| [Audio](./audio) | PipeWire outputs, inputs, streams, and device priority |
+| [Battery](./battery) | Battery charge, state, estimates, and UPower backend |
+| [Bluetooth](./bluetooth) | Adapters, devices, and BlueZ control |
+| [Brightness](./brightness) | Display and keyboard backlight control |
+| [Clipboard](./clipboard) | Wayland clipboard history |
+| [Config](./config) | Centralized configuration facade |
+| [ConfigStore](./configstore) | Configuration engine, persistence, history, and IPC |
+| [DateTime](./datetime) | Time, formatting, and locale |
+| [Media](./media) | MPRIS players and now-playing control |
+| [Network](./network) | Connectivity, Wi-Fi, devices, and signal |
+| [Notifications](./notifications) | Desktop notification server and history |
+| [Power](./power) | Shutdown, reboot, suspend, lock, and logout |
+| [Screens](./screens) | Screen tracking and primary-screen resolution |
+| [ServiceHost](./servicehost) | Eager service startup helper |
+| [SoundFX](./soundfx) | UI sounds, ambient loops, and profiles |
+| [SystemTray](./systemtray) | StatusNotifier tray items, pins, and menus |
