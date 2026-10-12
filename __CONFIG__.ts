@@ -25,7 +25,7 @@ export const PROJECTS: ProjectConfig[] = [
   {
     slug: "docs",
     label: "N0ctOS Docs",
-    contentDir: "content/docs",
+    contentDir: "content/developers",
   },
   {
     slug: "n0shop",

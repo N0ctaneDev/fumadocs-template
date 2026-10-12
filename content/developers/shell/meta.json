@@ -1,0 +1,8 @@
+{
+  "title": "Shell",
+  "description": "N0ctOS shell documentation",
+  "icon": "AppWindow",
+  "defaultOpen": true,
+  "root":true,
+  "pages": ["..."]
+}

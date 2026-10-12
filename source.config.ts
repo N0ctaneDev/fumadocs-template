@@ -5,9 +5,9 @@
 import { defineDocs, defineConfig } from "fumadocs-mdx/config";
 import { metaSchema, pageSchema } from "fumadocs-core/source/schema";
 
-// Docs → content/docs
+// Docs → content/developers
 export const docsDocs = defineDocs({
-  dir: "content/docs",
+  dir: "content/developers",
 
   docs: {
     schema: pageSchema,
