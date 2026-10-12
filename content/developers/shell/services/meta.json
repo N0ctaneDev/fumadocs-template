@@ -2,6 +2,7 @@
   "title": "Services",
   "description": "Centralized QML services for the N0ctOS shell",
   "icon": "Blocks",
+  "root":true,
   "defaultOpen": true,
   "pages": [
     "index",
