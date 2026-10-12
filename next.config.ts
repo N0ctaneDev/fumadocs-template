@@ -7,7 +7,7 @@ const withMDX = createMDX();
 const config = {
   basePath: siteConfig.basePath,
   reactStrictMode: true,
-  // output: "export" as const, // ⭐ 必须
+  output: "export" as const, // ⭐ 必须
   images: {
     unoptimized: true, // GitHub Pages 不支持 Image 优化
   },
